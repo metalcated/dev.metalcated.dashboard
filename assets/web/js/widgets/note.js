@@ -40,7 +40,9 @@ export function mountNote({ body, widget }) {
       show();
     })
     .catch((error) => {
-      sticky.textContent = error.message;
+      // A note nobody has written on has no store yet.
+      if (error.status === 404) show();
+      else sticky.textContent = error.message;
     });
 
   return subscribe(`homey:widgetstore:${widget.id}`, 'state', ({ state: next, replace }) => {
