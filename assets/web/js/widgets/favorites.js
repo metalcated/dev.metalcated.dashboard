@@ -2,7 +2,7 @@
 
 import { lightHex, lightMode } from '../color.js';
 import { requireData } from '../data.js';
-import { deviceIcon, deviceStatus, quickActionCapability, setCapability, watchDevice } from '../devices.js';
+import { deviceIcon, deviceStatus, isClass, quickActionCapability, setCapability, watchDevice } from '../devices.js';
 import { el, note, pulse, toast } from '../dom.js';
 import { PLAY_ICON, POWER_ICON } from '../icons.js';
 import { openDeviceSheet, sheetComponents } from '../sheets/device-sheet.js';
@@ -38,7 +38,8 @@ export function renderDeviceGrid(body, devices) {
   const cleanups = [];
 
   for (const device of devices) {
-    const tile = el('div', 'device-tile');
+    // Lights show yellow (or their colour) when on, with a dot before their status; other devices blue, without.
+    const tile = el('div', isClass(device, 'light') ? 'device-tile is-light' : 'device-tile');
     const icon = deviceIcon(device, 'device-icon');
     const name = el('span', 'device-name', device.name);
     name.title = device.name;

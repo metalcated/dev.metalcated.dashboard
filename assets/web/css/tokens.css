@@ -18,6 +18,7 @@
   --text-secondary: #6e6e75;
   --text-muted: #9a9aa1;
   --active: #f5b207;
+  --device-active: #1f8bea; /* an active device that isn't a light */
   --active-bg: #fff3d3;
   --play: #53d300;
   --shortcut: #016fff;
@@ -65,6 +66,7 @@
     --text-secondary: #9fa0a9;
     --text-muted: #74747c;
     --active: #f5b207;
+    --device-active: #339cfa; /* an active device that isn't a light */
     --active-bg: rgb(245 178 7 / 0.22);
     --play: #54d303;
     --tint-lightness: 1;
@@ -100,6 +102,7 @@
   --text-secondary: #9fa0a9;
   --text-muted: #74747c;
   --active: #f5b207;
+  --device-active: #339cfa; /* an active device that isn't a light */
   --active-bg: rgb(245 178 7 / 0.22);
   --play: #54d303;
   --tint-lightness: 1;

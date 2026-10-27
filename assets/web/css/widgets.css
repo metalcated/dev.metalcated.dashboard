@@ -117,6 +117,8 @@
 }
 .device-status:empty { display: none; }
 .device-tile.is-on .device-status::before { content: ""; flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--tile-active, var(--active)); }
+.device-tile.is-on:not(.is-light) .device-status::before { content: none; }
+.device-tile.is-on:not(.is-light) .power { background: color-mix(in srgb, var(--device-active) 20%, transparent); color: var(--device-active); }
 
 /* ----- Favorite flows and moods ----- */
 .pair-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
