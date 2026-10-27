@@ -44,11 +44,15 @@ export function thermostatControl(device, { title = device.name, variant = 'widg
     const off = capabilities.onoff?.value === false;
     const heating = !off && (mode === 'heat'
       || (mode !== 'cool' && mode !== 'off' && current != null && targetValue != null && targetValue > current));
+    const cooling = !off && mode === 'cool';
     card.classList.toggle('is-heating', heating);
-    card.classList.toggle('is-cooling', !off && mode === 'cool');
+    card.classList.toggle('is-cooling', cooling);
     card.classList.toggle('is-off', off);
+    // Not heating or cooling towards its target (it is reached): a plain card with the target alone, as in the app.
+    const idle = !off && !heating && !cooling;
+    card.classList.toggle('is-idle', idle);
     temps.replaceChildren();
-    if (off) {
+    if (off || idle) {
       temps.append(el('span', 'current', format(targetValue)));
     } else {
       if (current != null) temps.append(el('span', 'current', format(current)), el('span', 'arrow', '→'));

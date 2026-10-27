@@ -289,6 +289,11 @@
 .thermostat-steps button { flex: 1; display: grid; place-items: center; border: 0; padding: 0; background: transparent; color: inherit; cursor: pointer; }
 .thermostat-steps button:disabled { opacity: 0.4; cursor: default; }
 .thermostat-steps svg { width: 22px; height: 22px; }
+.thermostat.is-idle:not(.is-list) { background: var(--panel); border-color: transparent; }
+.thermostat.is-idle:not(.is-list) .thermostat-temps { color: color-mix(in srgb, var(--text-secondary) 75%, var(--panel)); }
+.thermostat.is-idle:not(.is-list) .thermostat-temps .current { opacity: 1; }
+.thermostat.is-idle:not(.is-list) .thermostat-steps { background: none; border-left: 1px solid var(--control); }
+.thermostat.is-idle:not(.is-list) .thermostat-steps button + button { border-top: 1px solid var(--control); }
 
 /* ----- Speaker ----- */
 .speaker { position: relative; isolation: isolate; overflow: hidden; border-radius: 16px; background: var(--panel); color: var(--text-primary); }
