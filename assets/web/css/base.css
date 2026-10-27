@@ -7,6 +7,9 @@ body {
   color: var(--text-primary);
   font: 16px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
 }
 button, input, select { font: inherit; color: inherit; }
 
@@ -91,7 +94,11 @@ html.kiosk, .kiosk body { overscroll-behavior: none; }
   overscroll-behavior-x: contain;
   scroll-snap-type: x proximity;
   scroll-padding-inline: 16px;
+  /* Fills the window under the bar, so the sideways scrollbar sits at the bottom of the window, not under short
+     columns. Fitted to the width, it has none. */
+  flex: 1 0 auto;
 }
+.fit .board { flex-grow: 0; }
 @media (max-width: 760px) {
   .board { scroll-snap-type: x mandatory; gap: 16px; }
   .bar h1 { font-size: 28px; }
