@@ -23,8 +23,16 @@ export function quickActionCapability(device) {
   return capability?.type === 'boolean' && capability.setable ? capability : null;
 }
 
+// What a lock's tile shows, unless another indicator was chosen for it: 'locked', 'unlocked' or null.
+export function lockState(device) {
+  const locked = device.capabilitiesObj?.locked?.value;
+  if (locked == null || (device.uiIndicator && device.uiIndicator !== 'locked')) return null;
+  return locked ? 'locked' : 'unlocked';
+}
+
 // Mirrors the mobile tiles: an offline device says so; climate devices show their temperature, even when off;
-// on/off devices show On (with dim level) or Off, even with a power reading as indicator; others their UI indicator.
+// on/off devices show On (with dim level) or Off, even with a power reading as indicator; a lock whether it is locked;
+// others their UI indicator, and without one a blind or window how far it is open.
 export function deviceStatus(device) {
   if (device.available === false) return 'No Response';
   const capabilities = device.capabilitiesObj ?? {};
@@ -34,7 +42,10 @@ export function deviceStatus(device) {
     if (!capabilities.onoff.value) return 'Off';
     return capabilities.dim?.value != null ? `On • ${Math.round(capabilities.dim.value * 100)}%` : 'On';
   }
+  const lock = lockState(device);
+  if (lock) return lock === 'locked' ? 'Locked' : 'Unlocked';
   if (device.uiIndicator && capabilities[device.uiIndicator]) return formatCapability(capabilities[device.uiIndicator]);
+  if (capabilities.windowcoverings_set?.value != null) return formatCapability(capabilities.windowcoverings_set);
   return '';
 }
 

@@ -118,6 +118,20 @@
 .device-status:empty { display: none; }
 .device-tile.is-on .device-status::before { content: ""; flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--tile-active, var(--active)); }
 .device-tile.is-on:not(.is-light) .device-status::before { content: none; }
+/* A lock's state: a yellow padlock, closed or open, like the app.
+   LICENSING: our own drawings standing in for the Homey app's padlock icons. */
+.device-tile.is-locked { --padlock: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M8 11V7.5a4 4 0 0 1 8 0V11' fill='none' stroke='%23000' stroke-width='2.4'/%3E%3Crect x='4.5' y='10' width='15' height='12' rx='2.5'/%3E%3C/svg%3E"); }
+.device-tile.is-unlocked { --padlock: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M8 11V7.5a4 4 0 0 1 7.7-1.5' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round'/%3E%3Crect x='4.5' y='10' width='15' height='12' rx='2.5'/%3E%3C/svg%3E"); }
+.device-tile.is-locked .device-status::before,
+.device-tile.is-unlocked .device-status::before {
+  content: "";
+  flex: none;
+  width: 13px;
+  height: 13px;
+  background: var(--active);
+  -webkit-mask: var(--padlock) center / contain no-repeat;
+  mask: var(--padlock) center / contain no-repeat;
+}
 .device-tile.is-on:not(.is-light) .power { background: color-mix(in srgb, var(--device-active) 20%, transparent); color: var(--device-active); }
 
 /* ----- Favorite flows and moods ----- */

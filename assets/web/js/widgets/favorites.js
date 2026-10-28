@@ -2,7 +2,7 @@
 
 import { lightHex, lightMode } from '../color.js';
 import { requireData } from '../data.js';
-import { deviceIcon, deviceStatus, isClass, quickActionCapability, setCapability, watchDevice } from '../devices.js';
+import { deviceIcon, deviceStatus, isClass, lockState, quickActionCapability, setCapability, watchDevice } from '../devices.js';
 import { el, note, pulse, toast } from '../dom.js';
 import { PLAY_ICON, POWER_ICON } from '../icons.js';
 import { openDeviceSheet, sheetComponents } from '../sheets/device-sheet.js';
@@ -86,6 +86,10 @@ export function renderDeviceGrid(body, devices) {
       if (tint) tile.style.setProperty('--tile-active', tint);
       else tile.style.removeProperty('--tile-active');
       tile.classList.toggle('is-unavailable', device.available === false);
+      // A lock's state gets a padlock, closed or open, before it.
+      const lock = device.available === false ? null : lockState(device);
+      tile.classList.toggle('is-locked', lock === 'locked');
+      tile.classList.toggle('is-unlocked', lock === 'unlocked');
       status.textContent = deviceStatus(device);
       if (power) {
         power.disabled = device.available === false;
