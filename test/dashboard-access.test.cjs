@@ -25,6 +25,7 @@ function fixture() {
   let ownerCalls = 0;
   let answer = null;
   const homey = {
+    cloud: { getHomeyId: async () => '1234567890abcdef12345678' },
     setInterval(callback) { const id = ++nextTimer; timers.set(id, callback); return id; },
     clearInterval(id) { timers.delete(id); },
     settings: { get: (key) => clone(saved.get(key)), set: (key, value) => saved.set(key, clone(value)), unset: (key) => saved.delete(key) },
@@ -202,6 +203,35 @@ test('widget responses cannot echo the backend credential', async () => {
   f.respond(async (_url, options) => ({ status: 200, ok: true, json: async () => ({ echo: options.headers.Authorization }) }));
   const result = await request(f.access, token, 'GET', '/api/manager/devices/device');
   assert.equal(result.echo, 'Bearer [redacted]');
+});
+
+test('owner requests include the SDK Homey identity header required by its local API client', async () => {
+  const f = fixture();
+  let identityReads = 0;
+  f.homey.cloud.getHomeyId = async () => { identityReads++; return 'abcdef1234567890abcdef12'; };
+  const connection = await f.access.connect();
+  await request(f.access, connection.token, 'GET', '/api/manager/devices/device');
+  assert.equal(identityReads, 1);
+  assert.equal(f.calls.length, 2);
+  assert.ok(f.calls.every((call) => call.headers['X-Homey-ID'] === 'abcdef1234567890abcdef12'));
+  assert.equal(Object.hasOwn(connection, 'homeyId'), false);
+  const missing = fixture();
+  missing.homey.cloud.getHomeyId = async () => null;
+  await assert.rejects(missing.access.connect(), denied(503));
+  assert.equal(missing.calls.length, 0);
+});
+
+test('Homey refusal details remain useful without echoing its backend credential', async () => {
+  const f = fixture();
+  f.respond(async (_url, options) => ({ ok: false, status: 403, json: async () => ({ error: `Missing scope; ${options.headers.Authorization}` }) }));
+  await assert.rejects(f.access.connect(), (error) => {
+    assert.equal(error.status, 403);
+    assert.match(error.message, /Missing scope/);
+    assert.match(error.message, /Bearer \[redacted\]/);
+    assert.ok(!error.message.includes('server-only-owner'));
+    return true;
+  });
+  assert.equal(f.calls.length, 1, 'a refusal never automatically repeats a request');
 });
 
 test('own app methods retain screen association and cannot reach app administration', async () => {

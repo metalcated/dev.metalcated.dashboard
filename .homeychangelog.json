@@ -31,5 +31,8 @@
   },
   "1.4.4": {
     "en": "Homey web app settings now connect through a private per-visit channel, supporting Homey’s restricted app frames without browser API credentials or manual setup."
+  },
+  "1.4.5": {
+    "en": "Automatic connections include Homey’s SDK identity header for local API requests. Refused requests show a concise reason with backend credentials removed."
   }
 }
