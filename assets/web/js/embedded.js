@@ -162,6 +162,14 @@ function openChannel() {
   }, { once: true });
 }
 
+function isCameraOffer(method, path, body) {
+  return method === 'POST' && typeof path === 'string'
+    && /^\/api\/manager\/videos\/video\/[\w:@.-]+\/offer$/.test(path)
+    && body !== null && typeof body === 'object' && !Array.isArray(body)
+    && Object.keys(body).length === 1 && Object.prototype.hasOwnProperty.call(body, 'offer')
+    && typeof body.offer === 'string' && body.offer.length > 0 && body.offer.length <= 256000;
+}
+
 export function requestEmbeddedBroker(route, body, { signal } = {}) {
   if (!channelMode || !port || !config || channelFailure) {
     return Promise.reject(channelFailure ?? channelError('The Homey dashboard connection is not ready. Reload to reconnect.'));
@@ -184,7 +192,8 @@ export function requestEmbeddedBroker(route, body, { signal } = {}) {
     const abort = () => finish(reject, Object.assign(new Error('The dashboard request was cancelled.'), { name: 'AbortError' }));
     requests.set(id, { resolve: (value) => finish(resolve, value), reject: (error) => finish(reject, error) });
     signal?.addEventListener('abort', abort, { once: true });
-    timer = setTimeout(() => finish(reject, channelError('Homey has not answered yet. Check the device before trying again.', 504)), 20000);
+    const timeout = route === 'request' && isCameraOffer(body.method, body.path, body.body) ? 55000 : 20000;
+    timer = setTimeout(() => finish(reject, channelError('Homey has not answered yet. Check the device before trying again.', 504)), timeout);
     try {
       // The parent supplies its own approved session; never forward a claimed
       // token from widget or child request data.

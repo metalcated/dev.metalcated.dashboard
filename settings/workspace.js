@@ -118,6 +118,14 @@ function createDashboardWorkspace(Homey) {
     }
   }
 
+  function isCameraOffer(method, path, body) {
+    return method === 'POST' && typeof path === 'string'
+      && /^\/api\/manager\/videos\/video\/[\w:@.-]+\/offer$/.test(path)
+      && body !== null && typeof body === 'object' && !Array.isArray(body)
+      && Object.keys(body).length === 1 && Object.prototype.hasOwnProperty.call(body, 'offer')
+      && typeof body.offer === 'string' && body.offer.length > 0 && body.offer.length <= 256000;
+  }
+
   function bridgeRequest(port, data) {
     if (!Number.isSafeInteger(data.id) || data.id < 1 || data.id > 2147483647) return;
     const reply = (value) => { if (port === bridgePort) port.postMessage({ type: 'dashboard:response', id: data.id, ...value }); };
@@ -131,11 +139,12 @@ function createDashboardWorkspace(Homey) {
     if (bridgeRequests.has(data.id) || bridgeRequests.size >= 32) {
       return reply({ ok: false, error: { message: 'Too many dashboard requests. Try again.', status: 429 } });
     }
+    const timeout = data.route === 'request' && isCameraOffer(data.body.method, data.body.path, data.body.body) ? 50000 : 25000;
     const timer = setTimeout(() => {
       if (port !== bridgePort || !bridgeRequests.has(data.id)) return;
       bridgeRequests.delete(data.id);
       reply({ ok: false, error: { message: 'Homey has not answered yet. Check the device before trying again.', status: 504 } });
-    }, 25000);
+    }, timeout);
     bridgeRequests.set(data.id, timer);
     const session = bridgeSession;
     // Homey's web app deliberately gives app settings an opaque origin. Its signed-in SDK channel can still reach

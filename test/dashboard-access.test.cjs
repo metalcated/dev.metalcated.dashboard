@@ -14,7 +14,7 @@ const SCREEN = 'screen-12345678';
 const DAY = 24 * 60 * 60 * 1000;
 const clone = (value) => value === undefined ? undefined : structuredClone(value);
 
-function fixture() {
+function fixture({ Access = DashboardAccess } = {}) {
   const saved = new Map();
   const calls = [];
   const topics = new Map();
@@ -62,7 +62,7 @@ function fixture() {
     getHighlight: (id) => ({ highlight: { id: 'highlight', target: id } }),
     closeHighlightFromScreen: async () => ({}),
   };
-  const access = new DashboardAccess({ homey, app, appId: APP_ID, now: () => now,
+  const access = new Access({ homey, app, appId: APP_ID, now: () => now,
     fetchImpl: async (url, options) => {
       calls.push({ url, ...options });
       if (answer) return answer(url, options, calls.length);
@@ -78,6 +78,124 @@ function fixture() {
 
 const request = (access, token, method, route, body) => access.request({ token, method, path: route, body });
 const denied = (status) => (error) => error.status === status && error.statusCode === status;
+
+function requestClock() {
+  let now = 0;
+  const timers = [];
+  const filename = path.resolve(__dirname, '../lib/dashboard-access.js');
+  const context = { module: { exports: {} }, require: createRequire(filename), URL, URLSearchParams, Buffer,
+    AbortSignal: { timeout(delay) {
+      const controller = new AbortController();
+      timers.push({ controller, delay, at: now + delay });
+      return controller.signal;
+    } },
+  };
+  vm.runInNewContext(readFileSync(filename, 'utf8'), context, { filename });
+  return {
+    Access: context.module.exports.DashboardAccess, timers,
+    advance(amount) {
+      now += amount;
+      for (const timer of timers) if (timer.at <= now && !timer.controller.signal.aborted) {
+        timer.controller.abort(Object.assign(new Error('The operation timed out.'), { name: 'TimeoutError' }));
+      }
+    },
+  };
+}
+
+test('a camera offer survives the old backend timeout and has one bounded 45-second attempt', async () => {
+  for (const finish of ['answer', 'timeout']) {
+    const clock = requestClock();
+    const f = fixture(clock);
+    f.homey.settings.set('apiKey', 'configured-camera-key');
+    const { token } = f.access.issue({ screenId: SCREEN });
+    let respond;
+    f.respond((_url, { signal }) => new Promise((resolve, reject) => {
+      respond = resolve;
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }));
+    let settled = false;
+    const pending = request(f.access, token, 'POST', '/api/manager/videos/video/camera-1/offer', { offer: 'v=0' })
+      .then((value) => { settled = true; return { value }; }, (error) => { settled = true; return { error }; });
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.equal(f.calls.length, 1);
+    assert.equal(clock.timers[0].delay, 45000);
+    clock.advance(15000); await Promise.resolve();
+    assert.equal(f.calls[0].signal.aborted, false);
+    assert.equal(settled, false, 'the original 15-second budget must not terminate a valid camera offer');
+    clock.advance(29999);
+    assert.equal(f.calls[0].signal.aborted, false);
+    if (finish === 'answer') respond({ ok: true, status: 200, json: async () => ({ answerSdp: 'camera-answer' }) });
+    else clock.advance(1);
+    const outcome = await pending;
+    if (finish === 'answer') assert.equal(outcome.value.answerSdp, 'camera-answer');
+    else {
+      assert.equal(outcome.error.status, 504);
+      assert.equal(outcome.error.message, 'The camera did not finish connecting. Tap to retry.');
+    }
+    assert.equal(f.calls.length, 1, 'an ambiguous camera failure is not replayed');
+  }
+});
+
+test('controls and camera-offer near misses keep the normal backend budget or fail validation', async () => {
+  const clock = requestClock();
+  const f = fixture(clock);
+  const { token } = f.access.issue({ screenId: SCREEN });
+  for (const [method, route, body] of [
+    ['PUT', '/api/manager/devices/device/device-1/capability/onoff', { value: true }],
+    ['POST', '/api/manager/flow/flow/flow-1/trigger', {}],
+    ['POST', '/api/manager/videos/video/camera-1/keep-alive', { streamId: 'stream' }],
+    ['POST', '/api/manager/videos/video/camera-1/offer/', { offer: 'v=0' }],
+    ['POST', '/api/manager/videos/video/camera%2D1/offer', { offer: 'v=0' }],
+    ['POST', '/api/manager/videos/video/camera-1/offer?', { offer: 'v=0' }],
+  ]) {
+    await f.access.request({ token, method, path: route, body, timeout: 999999 });
+    assert.equal(clock.timers.at(-1).delay, 15000, `${method} ${route}`);
+  }
+  const calls = f.calls.length;
+  for (const [method, route, body] of [
+    ['GET', '/api/manager/videos/video/camera-1/offer', undefined],
+    ['POST', '/api/manager/videos/video/camera-1/offer?extra=true', { offer: 'v=0' }],
+    ['POST', '/api/manager/videos/video/camera-1/offer', { offer: 'v=0', timeout: 999999 }],
+    ['POST', '/api/manager/videos/video/camera-1/offer', { offer: '' }],
+    ['POST', '/api/manager/videos/video/camera-1/offer', { offer: 'x'.repeat(256001) }],
+    ['POST', '/api/manager/videos/video/camera-1/offer', ['v=0']],
+  ]) await assert.rejects(request(f.access, token, method, route, body), (error) => [400, 403].includes(error.status));
+  assert.equal(f.calls.length, calls, 'invalid near misses cannot become owner requests');
+});
+
+test('only expiry of the camera request signal becomes a camera-specific 504, including a stalled response body', async () => {
+  for (const phase of ['fetch', 'json']) {
+    const clock = requestClock(); const f = fixture(clock);
+    f.homey.settings.set('apiKey', 'configured-camera-key');
+    const { token } = f.access.issue({ screenId: SCREEN });
+    f.respond((_url, { signal }) => {
+      const blocked = () => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+      return phase === 'fetch' ? blocked() : { ok: true, status: 200, json: blocked };
+    });
+    const pending = request(f.access, token, 'POST', '/api/manager/videos/video/camera-1/offer', { offer: 'v=0' }).catch((error) => error);
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+    clock.advance(45000);
+    const error = await pending;
+    assert.equal(error.status, 504, phase);
+    assert.equal(error.message, 'The camera did not finish connecting. Tap to retry.');
+    assert.equal(f.calls.length, 1);
+  }
+
+  const clock = requestClock(); const f = fixture(clock);
+  const { token } = f.access.issue({ screenId: SCREEN });
+  f.respond(async () => { throw Object.assign(new Error('network closed'), { name: 'TimeoutError' }); });
+  await assert.rejects(request(f.access, token, 'POST', '/api/manager/videos/video/camera-1/offer', { offer: 'v=0' }),
+    (error) => error.status === 502 && error.message === 'Homey could not be reached. Try again.');
+  assert.equal(clock.timers[0].controller.signal.aborted, false, 'an error name alone is not the broker deadline');
+  f.respond((_url, { signal }) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })));
+  const normal = request(f.access, token, 'PUT', '/api/manager/devices/device/device-1/capability/onoff', { value: true }).catch((error) => error);
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  clock.advance(15000);
+  const error = await normal;
+  assert.equal(error.status, 502, 'ordinary control timeout status remains unchanged');
+  assert.equal(error.message, 'Homey could not be reached. Try again.');
+  assert.equal(f.calls.length, 2, 'neither failure is replayed');
+});
 
 test('connections are lazy, opaque, hashed, persistent, bounded, and revocable by screen', async () => {
   const f = fixture();

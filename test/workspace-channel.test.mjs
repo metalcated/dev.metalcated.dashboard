@@ -36,10 +36,16 @@ class Target {
 
 function clock() {
   let serial = 0;
+  let now = 0;
   const timers = new Map();
   return {
-    setTimeout(callback, delay) { const id = ++serial; timers.set(id, { callback, delay }); return id; },
+    setTimeout(callback, delay) { const id = ++serial; timers.set(id, { callback, delay, at: now + delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
+    count(delay) { return [...timers.values()].filter((timer) => timer.delay === delay).length; },
+    advance(amount) {
+      now += amount;
+      for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.callback(); }
+    },
     expire(delay) {
       for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.callback(); }
     },
@@ -196,4 +202,116 @@ test('reload closes the prior channel and stale SDK replies cannot enter the rep
   parent.calls.at(-1).callback(null, { ...session, token: `wd_${'d'.repeat(64)}` });
   const config = await configReady;
   assert.equal(config.token, 'embedded-channel');
+});
+
+const cameraOffer = { method: 'POST', path: '/api/manager/videos/video/camera-1/offer', body: { offer: 'v=0' } };
+
+test('a real camera offer crosses the actual parent/child channel beyond all old budgets and returns its answer', async () => {
+  const { parent, view, client } = await connected();
+  let settled = false;
+  const pending = client.api(cameraOffer.method, cameraOffer.path, cameraOffer.body).finally(() => { settled = true; });
+  await drain();
+  assert.equal(parent.clock.count(50000), 1);
+  assert.equal(view.clock.count(55000), 1);
+  for (const amount of [15000, 5000, 5000, 15000]) {
+    parent.clock.advance(amount); view.clock.advance(amount); await drain();
+    assert.equal(settled, false, 'the old 15/20/25-second budgets must not terminate a camera offer');
+  }
+  assert.equal(parent.calls.length, 2);
+  assert.equal(parent.calls[1].body.token, session.token);
+  parent.calls[1].callback(null, { answerSdp: 'after-forty-seconds', streamId: 'camera-stream' });
+  assert.deepEqual(structuredClone(await pending), { answerSdp: 'after-forty-seconds', streamId: 'camera-stream' });
+  assert.equal(parent.clock.count(50000), 0);
+  assert.equal(view.clock.count(55000), 0);
+  assert.equal(parent.calls.length, 2, 'a slow offer must not be replayed');
+});
+
+test('parent camera expiry reaches the actual child once, ignores a late answer and permits a normal follow-up', async () => {
+  const { parent, view, client } = await connected();
+  const pending = client.api(cameraOffer.method, cameraOffer.path, cameraOffer.body).catch((error) => error);
+  await drain();
+  const old = parent.calls[1];
+  parent.clock.advance(50000); view.clock.advance(50000); await drain();
+  assert.equal((await pending).status, 504);
+  assert.equal(view.clock.count(55000), 0);
+  const replies = view.channels[0].port2.messages.length;
+  old.callback(null, { answerSdp: 'expired-answer' }); await drain();
+  assert.equal(view.channels[0].port2.messages.length, replies);
+  assert.equal(parent.calls.length, 2);
+  const followup = client.api('GET', '/api/manager/dashboards/dashboard');
+  await drain();
+  assert.equal(parent.clock.count(25000), 1);
+  assert.equal(view.clock.count(20000), 1);
+  parent.calls.at(-1).callback(null, { dashboard: 'still-connected' });
+  assert.equal((await followup).dashboard, 'still-connected');
+});
+
+test('the child camera guard expires at 55 seconds and ignores a late parent answer without closing the channel', async () => {
+  const { parent, view, client } = await connected();
+  const pending = client.api(cameraOffer.method, cameraOffer.path, cameraOffer.body).catch((error) => error);
+  await drain();
+  view.clock.advance(25000); await drain();
+  assert.equal(view.clock.count(55000), 1);
+  view.clock.advance(30000);
+  assert.equal((await pending).status, 504);
+  parent.calls[1].callback(null, { answerSdp: 'late-parent-answer' }); await drain();
+  assert.equal(parent.calls.length, 2);
+  const followup = client.api('GET', '/api/manager/dashboards/dashboard');
+  await drain();
+  parent.calls.at(-1).callback(null, { dashboard: 'fresh-response' });
+  assert.equal((await followup).dashboard, 'fresh-response');
+});
+
+test('camera-like requests and controls retain ordinary child and parent guards with no timeout override', async () => {
+  for (const [route, body] of [
+    ['request', { method: 'PUT', path: '/api/manager/devices/device/device-1/capability/onoff', body: { value: true }, timeout: 999999 }],
+    ['request', { ...cameraOffer, method: 'GET' }],
+    ['request', { ...cameraOffer, path: `${cameraOffer.path}/` }],
+    ['request', { ...cameraOffer, path: `${cameraOffer.path}?extra=true` }],
+    ['request', { ...cameraOffer, path: '/api/manager/videos/video/camera%2D1/offer' }],
+    ['request', { ...cameraOffer, body: { offer: 'v=0', timeout: 999999 } }],
+    ['request', { ...cameraOffer, body: { offer: '' } }],
+    ['request', { ...cameraOffer, body: { offer: 'x'.repeat(256001) } }],
+    ['request', { ...cameraOffer, body: ['v=0'] }],
+    ['events', { ...cameraOffer, timeout: 999999 }],
+  ]) {
+    const { parent, view, client } = await connected();
+    const pending = client.broker(route, body, { timeout: 999999 }).catch((error) => error);
+    await drain();
+    assert.equal(parent.clock.count(25000), 1, `${route} ${body.path}`);
+    assert.equal(view.clock.count(20000), 1, `${route} ${body.path}`);
+    assert.equal(parent.clock.count(50000), 0);
+    assert.equal(view.clock.count(55000), 0);
+    view.clock.advance(20000);
+    assert.equal((await pending).status, 504);
+    parent.clock.advance(25000); await drain();
+    assert.equal(parent.calls.length, 2, 'timed-out near misses are not replayed');
+  }
+});
+
+test('disposing a child with a pending extended camera request rejects it and drops the late SDK response', async () => {
+  const { parent, view, client } = await connected();
+  const pending = client.api(cameraOffer.method, cameraOffer.path, cameraOffer.body).catch((error) => error);
+  await drain();
+  view.window.emit('pagehide');
+  assert.equal((await pending).status, 401);
+  assert.equal(view.channels[0].port1.closed, true);
+  assert.equal(view.clock.count(55000), 0);
+  parent.calls[1].callback(null, { answerSdp: 'late-after-dispose' }); await drain();
+  assert.equal(parent.calls.length, 2);
+  await assert.rejects(client.api(cameraOffer.method, cameraOffer.path, cameraOffer.body), (error) => error.status === 401);
+});
+
+test('the camera backend timeout reaches the real child with its useful status and message before outer guards', async () => {
+  const { parent, view, client } = await connected();
+  const pending = client.api(cameraOffer.method, cameraOffer.path, cameraOffer.body).catch((error) => error);
+  await drain();
+  parent.clock.advance(45000); view.clock.advance(45000);
+  parent.calls[1].callback(Object.assign(new Error('The camera did not finish connecting. Tap to retry.'), { statusCode: 504 }));
+  const error = await pending;
+  assert.equal(error.status, 504);
+  assert.equal(error.message, 'The camera did not finish connecting. Tap to retry.');
+  assert.equal(parent.clock.count(50000), 0);
+  assert.equal(view.clock.count(55000), 0);
+  assert.equal(parent.calls.length, 2, 'a camera-specific timeout does not replay the offer');
 });

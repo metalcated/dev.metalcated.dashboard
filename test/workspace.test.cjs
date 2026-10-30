@@ -303,6 +303,64 @@ function openChannel(host, changes = {}) {
   return port;
 }
 
+test('only a strict camera offer gets the 50-second parent budget and late replies cannot revive it', () => {
+  const host = workspace({ opaqueOrigin: true });
+  host.controller.setAddress(ADDRESS);
+  const port = openChannel(host);
+  host.calls[0].callback(null, approved);
+  port.emit({ type: 'dashboard:request', id: 1, route: 'request', body: {
+    method: 'POST', path: '/api/manager/videos/video/camera-1/offer', body: { offer: 'v=0' },
+  } });
+  assert.equal(host.calls[1].route, '/workspace/request');
+  assert.equal(host.calls[1].body.token, approved.token);
+  assert.deepEqual([...host.timers.values()].map(({ delay }) => delay), [50000]);
+  assert.equal(port.sent.some((message) => message.type === 'dashboard:response'), false);
+  host.runTimer(50000);
+  assert.equal(port.sent.at(-1).error.status, 504);
+  const count = port.sent.length;
+  host.calls[1].callback(null, { answerSdp: 'late-answer' });
+  assert.equal(port.sent.length, count);
+  assert.equal(host.calls.length, 2, 'timeouts never replay a camera offer');
+});
+
+test('parent control and offer near-miss budgets cannot be extended by supplied timeout values', () => {
+  const requests = [
+    ['request', { method: 'PUT', path: '/api/manager/devices/device/device-1/capability/onoff', body: { value: true }, timeout: 999999 }],
+    ['request', { method: 'POST', path: '/api/manager/flow/flow/flow-1/trigger', body: {} }],
+    ['request', { method: 'POST', path: '/api/manager/videos/video/camera-1/keep-alive', body: { streamId: 'stream' } }],
+    ...[
+      { method: 'GET' }, { method: 'post' }, { path: '/api/manager/videos/video/camera-1/offer/' },
+      { path: '/api/manager/videos/video/camera-1/offer?query=true' }, { path: '/api/manager/videos/video/camera%2D1/offer' },
+      { body: { offer: '', timeout: 999999 } }, { body: { offer: 'v=0', timeout: 999999 } },
+      { body: { offer: 'x'.repeat(256001) } }, { body: ['v=0'] }, { body: null },
+    ].map((changes) => ['request', { method: 'POST', path: '/api/manager/videos/video/camera-1/offer', body: { offer: 'v=0' }, ...changes }]),
+    ['events', { method: 'POST', path: '/api/manager/videos/video/camera-1/offer', body: { offer: 'v=0' } }],
+  ];
+  for (const [route, body] of requests) {
+    const host = workspace({ opaqueOrigin: true }); host.controller.setAddress(ADDRESS);
+    const port = openChannel(host); host.calls[0].callback(null, approved);
+    port.emit({ type: 'dashboard:request', id: 1, route, body, timeout: 999999 });
+    assert.deepEqual([...host.timers.values()].map(({ delay }) => delay), [25000], `${route} ${body.method} ${body.path}`);
+    host.runTimer(25000);
+    assert.equal(port.sent.at(-1).error.status, 504);
+    assert.equal(host.calls.length, 2);
+  }
+});
+
+test('disposing the parent cancels an extended camera request and ignores its late SDK callback', () => {
+  const host = workspace({ opaqueOrigin: true }); host.controller.setAddress(ADDRESS);
+  const port = openChannel(host); host.calls[0].callback(null, approved);
+  port.emit({ type: 'dashboard:request', id: 1, route: 'request', body: {
+    method: 'POST', path: '/api/manager/videos/video/camera-1/offer', body: { offer: 'v=0' },
+  } });
+  host.window.emit('pagehide');
+  assert.equal(port.closed, true);
+  assert.equal(host.timers.size, 0);
+  const count = port.sent.length;
+  host.calls[1].callback(null, { answerSdp: 'late-after-dispose' });
+  assert.equal(port.sent.length, count);
+});
+
 test('an opaque Homey settings view binds only its current iframe and nonce to a private channel', () => {
   const host = workspace({ opaqueOrigin: true });
   host.controller.setAddress(ADDRESS);
