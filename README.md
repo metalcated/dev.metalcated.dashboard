@@ -4,19 +4,21 @@ A Homey app that shows your native Homey dashboards inside Homey's app view or i
 
 This fork adds an integrated dashboard workspace and automatic app authentication. Homey's SDK does not provide a documented way for apps to add a main navigation sidebar item. Open **Apps → Web Dashboard → Configure** for the supported in-Homey workspace; its **Dashboards** tab opens directly on your dashboards. A desktop sidebar lists your existing dashboards, and the title picker remains available on smaller screens and in the mobile view.
 
-The app now requests `homey:manager:api` access. Homey must grant that permission during installation/update before automatic connection works. The app keeps its automatic owner credential on the backend and brokers only supported dashboard operations. No manual API-key creation or browser approval is needed inside Homey.
+The app requests `homey:manager:api` access and brokers only supported dashboard operations. The built-in app credential stays on the backend. Some Homey firmware, including the tested self-hosted 13.5.3 server, does not grant native dashboard scopes to that credential. Those installations need a dedicated scoped dashboard key once; setup can create and save it directly on Homey after the owner approves the requested access. New displays still receive revocable broker connections, not that key.
 
 The dashboard is static files in `assets/web/`, which Homey serves at `/app/dev.schweiger.dashboard/assets/web/index.html`.
 `app.js` works out that address for the settings page. `lib/dashboard-access.js` provides automatic connection, constrained API access and live updates. Existing manual API keys and previously approved browsers continue to work as an advanced compatibility path.
 
 ## Using it
 
-1. Install/update the app, grant its Homey access permission, and open **Apps → Web Dashboard → Configure**. The **Dashboards** tab connects automatically using the signed-in Homey app session.
+1. Install/update the app and approve its Homey access. If the firmware restricts native dashboards, authorize the dedicated dashboard key during setup. Open **Apps → Web Dashboard → Configure**; the **Dashboards** tab then connects using the signed-in Homey app session.
 2. For a separate browser or wall display, choose **Open separately** or copy its address from **Connection & screens**. Approve its matching six-digit code there once. No API key needs to be copied.
 
 The embedded connection stays in memory. A separate approved screen stores an opaque, revocable dashboard connection in IndexedDB; the owner's Homey credential is never sent to that screen. Native screen identities are also stored in IndexedDB, separately for each Homey. Layouts remain stored in Homey, so mobile and web edits use the same dashboard objects.
 
 Homey's web app restricts its settings frames to an opaque origin. The workspace supports this through a private message channel tied to the exact dashboard frame and a fresh per-visit challenge. Only its two constrained dashboard broker routes pass through Homey's signed-in app SDK. The broker credential stays in the settings view; the rendered dashboard receives a connection marker and no API credential. Reloading closes the old channel and ignores its late replies.
+
+`scripts/authorize-dashboard.cjs` prepares the one-time owner-authorized key setup through an already authenticated Homey API client. It requires explicit approval, the intended Homey identity and app version, refuses to replace an existing configuration, and requests only the widget and dashboard scopes. It does not request the unrestricted `homey` scope. The key is validated through the app's protected connection endpoint and saved in Homey's settings database without printing it. This helper does not sign in, grant itself access, or run during normal app startup.
 
 When Homey's app settings are opened from a local Homey address, the workspace reuses that working address, including its protocol and port. This also supports self-hosted servers on networks where Homey's generated secure hostname cannot be resolved.
 

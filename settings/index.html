@@ -500,7 +500,7 @@
           keyStatus.textContent = !isSet
             ? automaticConnection
               ? 'Connected automatically through Homey. A manual API key is optional.'
-              : 'Automatic connection is not available. Update the app and accept its Homey access permission, or use a manual key.'
+              : status && status.reason || 'Dashboard access needs authorization. Connect a dedicated dashboard key to finish setup.'
             : justSaved
               ? 'Saved. The key belongs to ' + status.user + '; browsers can be paired now.'
               : 'Set, belongs to ' + status.user + '.';

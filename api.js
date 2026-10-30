@@ -43,7 +43,7 @@ module.exports = {
   },
 
   async setApiKey({ homey, body }) {
-    return homey.app.setApiKey(body?.key);
+    return homey.app.setApiKey(body?.key, { onlyIfUnset: body?.onlyIfUnset === true });
   },
 
   async listScreens({ homey }) {

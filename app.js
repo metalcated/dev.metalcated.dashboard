@@ -272,9 +272,19 @@ module.exports = class DashboardApp extends Homey.App {
 
   // Also asks Homey what the saved key may do, so the settings page can name missing and too broad permissions.
   async getApiKeyStatus() {
-    const status = this.homey.settings.get('apiKeyStatus') ?? { set: false };
-    if (!status.set) return { ...status, automatic: true };
-    const scopes = await this.keyScopes(this.homey.settings.get('apiKey')).catch(() => null);
+    const savedKey = this.homey.settings.get('apiKey');
+    const configured = typeof savedKey === 'string' && savedKey.trim() !== '';
+    const status = { ...(this.homey.settings.get('apiKeyStatus') ?? {}), set: configured };
+    if (!configured) {
+      const token = await this.getDashboardAccess().getGeneratedOwnerToken().catch(() => null);
+      const scopes = token ? await this.keyScopes(token).catch(() => null) : null;
+      const automatic = Array.isArray(scopes) && grants(scopes, 'homey.dashboard.readonly');
+      // Some Homey versions expose the API permission but omit dashboard access from the app session. Report the
+      // effective grant rather than promising an automatic connection that the server will refuse.
+      return { ...status, automatic, reason: automatic ? null
+        : 'Homey’s built-in app connection does not grant native dashboard access. Authorize a dedicated dashboard key to finish setup.' };
+    }
+    const scopes = await this.keyScopes(savedKey).catch(() => null);
     if (scopes == null) return status;
     return {
       ...status,
@@ -290,7 +300,9 @@ module.exports = class DashboardApp extends Homey.App {
   // A request to this Homey's Web API with the given key (by default the saved one).
   async callHomey(path, token = this.homey.settings.get('apiKey')) {
     const localUrl = await this.homey.api.getLocalUrl();
-    return fetch(`${localUrl}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    const homeyId = await this.homey.cloud.getHomeyId();
+    return fetch(`${localUrl}${path}`, { redirect: 'error', signal: AbortSignal.timeout(15000),
+      headers: { Authorization: `Bearer ${token}`, 'X-Homey-ID': homeyId } });
   }
 
   async getFromHomey(path) {
@@ -308,7 +320,16 @@ module.exports = class DashboardApp extends Homey.App {
   }
 
   // Checks the key against this Homey before storing it, so a typo doesn't surface later on every tablet.
-  async setApiKey(key) {
+  async setApiKey(key, { onlyIfUnset = false } = {}) {
+    const requireUnset = () => {
+      const existing = this.homey.settings.get('apiKey');
+      if (onlyIfUnset && typeof existing === 'string' && existing.trim()) {
+        const error = new Error('A dashboard key is already configured. Nothing was replaced.');
+        error.status = error.statusCode = 409;
+        throw error;
+      }
+    };
+    requireUnset();
     if (typeof key !== 'string' || key.trim() === '') {
       this.homey.settings.unset('apiKey');
       this.homey.settings.unset('apiKeyStatus');
@@ -325,6 +346,9 @@ module.exports = class DashboardApp extends Homey.App {
 
     const user = await me.json();
     const status = { set: true, user: user.name, savedAt: new Date().toISOString() };
+    // No await separates this final check and the write. A setup helper cannot replace a key saved while its
+    // validation requests were in flight; ordinary explicitly requested manual key changes keep their behavior.
+    requireUnset();
     this.homey.settings.set('apiKey', token);
     this.homey.settings.set('apiKeyStatus', status);
     this.log(`API key saved (user ${user.name})`);

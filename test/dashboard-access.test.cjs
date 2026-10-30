@@ -47,6 +47,7 @@ function fixture() {
     },
   };
   const data = {
+    '/api/manager/sessions/session/me': { scopes: ['homey'] },
     '/api/manager/dashboards/dashboard': { board: { id: 'board', name: 'House', columns: [{ id: 'column', widgets: [
       { id: 'widget-12345678', type: 'app_webview', data: { appWidgetId: 'catalog' } },
       { id: 'note-12345678', type: 'note' },
@@ -122,7 +123,38 @@ test('automatic connect validates Homey access and never returns the owner crede
   const scopes = await request(f.access, result.token, 'GET', '/api/manager/sessions/session/me');
   assert.ok(scopes.scopes.includes('homey.dashboard'));
   assert.equal(scopes.scopes.includes('homey'), false);
-  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls.length, 2);
+});
+
+test('broker permissions reflect effective configured-key scopes and never expose the underlying session', async () => {
+  const f = fixture();
+  const key = 'configured-readonly-dashboard-key';
+  f.homey.settings.set('apiKey', key);
+  const { token } = f.access.issue({ screenId: SCREEN });
+  f.data['/api/manager/sessions/session/me'] = {
+    intersectedScopes: ['homey.dashboard.readonly', 'homey.device.readonly'], scopes: ['homey'],
+    token: key, user: { name: 'Private owner' }, id: 'private-session-id',
+  };
+  const readonly = await request(f.access, token, 'GET', '/api/manager/sessions/session/me');
+  assert.deepEqual(readonly.scopes, ['homey.dashboard.readonly', 'homey.device.readonly']);
+  assert.equal(readonly.scopes.includes('homey.dashboard'), false);
+  assert.equal(f.ownerCalls(), 0);
+  assert.equal(JSON.stringify(readonly).includes('Private owner'), false);
+  assert.equal(JSON.stringify(readonly).includes(key), false);
+  assert.equal(JSON.stringify(readonly).includes('private-session-id'), false);
+
+  f.data['/api/manager/sessions/session/me'] = { scopes: ['homey.dashboard'] };
+  const editable = await request(f.access, token, 'GET', '/api/manager/sessions/session/me');
+  assert.deepEqual(editable.scopes, ['homey.dashboard.readonly', 'homey.dashboard']);
+  f.data['/api/manager/sessions/session/me'] = { intersectedScopes: [], scopes: ['homey'] };
+  assert.deepEqual((await request(f.access, token, 'GET', '/api/manager/sessions/session/me')).scopes, []);
+  f.data['/api/manager/sessions/session/me'] = { scopes: ['homey'] };
+  const owner = await request(f.access, token, 'GET', '/api/manager/sessions/session/me');
+  assert.equal(owner.scopes.includes('homey.dashboard'), true);
+  assert.equal(owner.scopes.includes('homey.dashboard.readonly'), true);
+  assert.equal(owner.scopes.includes('homey'), false);
+  assert.equal(owner.scopes.includes('homey.app.control'), false);
+  assert.equal(owner.scopes.includes('homey.device'), false);
 });
 
 test('the broker admits the existing dashboard reads and selected controls', async () => {
@@ -195,6 +227,76 @@ test('401 renews once; ambiguous write failures and other errors are never repla
   f.respond(async () => ({ status: 500, ok: false }));
   await assert.rejects(request(f.access, token, 'PUT', '/api/manager/devices/device/device-1/capability/onoff', { value: false }), denied(500));
   assert.equal(f.calls.length, before + 2);
+});
+
+test('a server-configured scoped key handles dashboard read/edit without generating or exposing an owner session', async () => {
+  const f = fixture();
+  const key = 'server-configured-scoped-dashboard-key';
+  f.homey.settings.set('apiKey', key);
+  const connection = await f.access.connect({ screenId: SCREEN });
+  await request(f.access, connection.token, 'PUT', '/api/manager/dashboards/dashboard/board', { name: 'Updated', columns: [] });
+  assert.equal(f.ownerCalls(), 0);
+  assert.equal(f.calls.length, 2);
+  assert.ok(f.calls.every((call) => call.headers.Authorization === `Bearer ${key}`));
+  assert.equal(JSON.stringify(connection).includes(key), false);
+  assert.equal(JSON.stringify(f.homey.settings.get('workspaceSessions')).includes(key), false);
+  f.respond(async (_url, options) => ({ ok: true, status: 200, json: async () => ({ echo: options.headers.Authorization }) }));
+  assert.equal((await request(f.access, connection.token, 'GET', '/api/manager/devices/device')).echo, 'Bearer [redacted]');
+});
+
+test('a rejected configured key never falls back to generated access or repeats a control', async () => {
+  const f = fixture();
+  await f.access.getOwnerToken(); // There is even an available generated session that must not be used as fallback.
+  const key = 'revoked-server-configured-dashboard-key';
+  f.homey.settings.set('apiKey', key);
+  const { token } = f.access.issue({ screenId: SCREEN });
+  f.respond(async () => ({ ok: false, status: 401, json: async () => ({ error: `Rejected ${key}` }) }));
+  await assert.rejects(request(f.access, token, 'PUT', '/api/manager/devices/device/device-1/capability/onoff', { value: true }),
+    (error) => error.status === 401 && !error.message.includes(key) && error.message.includes('[redacted]'));
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].headers.Authorization, `Bearer ${key}`);
+  assert.equal(f.ownerCalls(), 1);
+  await assert.rejects(request(f.access, token, 'GET', '/api/manager/dashboards/dashboard'), denied(401));
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.ownerCalls(), 1);
+});
+
+test('configured key rotation/removal is observed on demand and a mid-request removal cannot trigger fallback', async () => {
+  const f = fixture();
+  const { token } = f.access.issue({ screenId: SCREEN });
+  f.homey.settings.set('apiKey', 'server-configured-first-key');
+  await request(f.access, token, 'GET', '/api/manager/dashboards/dashboard');
+  f.homey.settings.set('apiKey', 'server-configured-second-key');
+  await request(f.access, token, 'GET', '/api/manager/dashboards/dashboard');
+  assert.equal(f.calls[1].headers.Authorization, 'Bearer server-configured-second-key');
+  assert.equal(f.ownerCalls(), 0);
+  f.respond(async () => {
+    f.homey.settings.unset('apiKey');
+    return { ok: false, status: 401 };
+  });
+  await assert.rejects(request(f.access, token, 'PUT', '/api/manager/devices/device/device-1/capability/onoff', { value: false }), denied(401));
+  assert.equal(f.calls.length, 3);
+  assert.equal(f.ownerCalls(), 0);
+  f.respond(async () => ({ ok: true, status: 200, json: async () => ({ success: true }) }));
+  await request(f.access, token, 'GET', '/api/manager/devices/device');
+  assert.equal(f.ownerCalls(), 1, 'a later explicit settings removal permits generated access on a new request');
+});
+
+test('a configured key saved during SDK authentication wins, and remembered redaction credentials remain bounded', async () => {
+  const f = fixture();
+  let finish;
+  f.homey.api.getOwnerApiToken = () => new Promise((resolve) => { finish = resolve; });
+  const pending = f.access.getOwnerToken();
+  await Promise.resolve();
+  f.homey.settings.set('apiKey', 'new-server-key-during-sdk-request');
+  finish('generated-session-that-was-already-pending');
+  assert.equal(await pending, 'new-server-key-during-sdk-request');
+  for (let i = 0; i < 10; i += 1) {
+    f.homey.settings.set('apiKey', `server-key-rotation-${i}`);
+    assert.equal(await f.access.getOwnerToken(), `server-key-rotation-${i}`);
+  }
+  assert.equal(f.access.ownerCredentials.size, 4);
+  assert.equal(f.access.redact({ key: 'server-key-rotation-9' }).key, '[redacted]');
 });
 
 test('widget responses cannot echo the backend credential', async () => {
@@ -380,10 +482,48 @@ test('app pairing no longer needs manual keys and preserves the separate legacy 
   app.keyScopes = async (token) => { checked = token; return ['homey.device.control']; };
   await app.checkKey('existing-manual-key', 'homey.device.control');
   assert.equal(checked, 'existing-manual-key');
+  const restricted = await app.getApiKeyStatus();
+  assert.equal(restricted.automatic, false);
+  assert.match(restricted.reason, /does not grant native dashboard access/);
+  app.keyScopes = async () => ['homey.dashboard'];
   assert.equal((await app.getApiKeyStatus()).automatic, true);
+  f.homey.settings.set('apiKey', 'server-only-configured-key');
+  assert.equal((await app.getApiKeyStatus()).set, true, 'configured status comes from the actual stored key');
   const old = app.requestPairing({ name: 'Expired', screenId: SCREEN });
   app.pairings.get(old.id).createdAt = 0;
   assert.throws(() => app.approvePairing(old.id), /no longer waiting/);
+});
+
+test('owner-approved setup atomically refuses an existing key, including a concurrent manual save', async () => {
+  const f = fixture();
+  const filename = path.resolve(__dirname, '../app.js');
+  const appRequire = createRequire(filename);
+  const context = { module: { exports: {} }, require: (id) => id === 'homey' ? { App: class {} } : appRequire(id), URL, fetch };
+  vm.runInNewContext(readFileSync(filename, 'utf8'), context, { filename });
+  const app = new context.module.exports();
+  Object.assign(app, { homey: f.homey, log() {}, getApiKeyStatus: async () => ({ set: true }) });
+  let calls = 0;
+  let concurrent = false;
+  app.callHomey = async (route) => {
+    calls++;
+    if (concurrent && route.includes('/dashboards/')) f.homey.settings.set('apiKey', 'key-saved-in-another-view');
+    return { ok: true, status: 200, json: async () => ({ name: 'Owner' }) };
+  };
+  f.homey.settings.set('apiKey', 'existing-user-key');
+  await assert.rejects(app.setApiKey('new-setup-key', { onlyIfUnset: true }), denied(409));
+  assert.equal(calls, 0);
+  assert.equal(f.homey.settings.get('apiKey'), 'existing-user-key');
+  f.homey.settings.unset('apiKey');
+  concurrent = true;
+  await assert.rejects(app.setApiKey('new-setup-key', { onlyIfUnset: true }), denied(409));
+  assert.equal(f.homey.settings.get('apiKey'), 'key-saved-in-another-view');
+  concurrent = false;
+  await app.setApiKey('explicit-manual-replacement');
+  assert.equal(f.homey.settings.get('apiKey'), 'explicit-manual-replacement', 'the existing manual Change key path remains supported');
+  const api = require('../api');
+  let received;
+  await api.setApiKey({ homey: { app: { setApiKey: (...args) => { received = args; } } }, body: { key: 'setup-key', onlyIfUnset: true } });
+  assert.equal(received[1].onlyIfUnset, true);
 });
 
 test('app lifecycle events retain update/reinstall signals without exposing settings or credentials', async () => {
