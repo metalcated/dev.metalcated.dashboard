@@ -4,6 +4,9 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 async function load(name, globals = {}, imports = {}) {
+  if (name === 'homey-api.js' && !imports['./embedded.js']) {
+    imports['./embedded.js'] = { usesEmbeddedBroker: () => false, requestEmbeddedBroker: () => assert.fail('not an embedded connection') };
+  }
   const context = vm.createContext({ URL, URLSearchParams, structuredClone, setTimeout, clearTimeout, AbortController, console, ...globals });
   const source = await readFile(new URL(`../assets/web/js/${name}`, import.meta.url), 'utf8');
   const module = new vm.SourceTextModule(source, { context });
@@ -176,6 +179,170 @@ test('the fallback cannot bypass a cross-origin location access denial or a malf
   malformed.parent.location = { href: `${location.origin}/app/test.dashboard/settings/index.html` };
   const invalid = await load('embedded.js', { ...malformed, location });
   await assert.rejects(invalid.waitForEmbeddedConfig(), /Open this dashboard from its Homey app view/);
+});
+
+function channels() {
+  const pairs = [];
+  class Port {
+    constructor() { this.closed = false; this.sent = []; }
+    start() {}
+    close() { this.closed = true; }
+    postMessage(message) {
+      if (this.closed) throw new Error('Port closed');
+      const copy = structuredClone(message);
+      this.sent.push(copy);
+      queueMicrotask(() => { if (!this.peer.closed) this.peer.onmessage?.({ data: copy }); });
+    }
+  }
+  class MessageChannel {
+    constructor() {
+      this.port1 = new Port();
+      this.port2 = new Port();
+      this.port1.peer = this.port2;
+      this.port2.peer = this.port1;
+      pairs.push(this);
+    }
+  }
+  return { MessageChannel, pairs };
+}
+
+async function channelFrame(extraGlobals = {}) {
+  const browser = embeddedBrowser('http://homey.local:4859/app/test.dashboard/settings/index.html');
+  browser.window.origin = 'null';
+  const channel = channels();
+  let transferred;
+  browser.parent.postMessage = (message, origin, ports) => {
+    browser.sent.push({ message, origin });
+    transferred = ports[0];
+  };
+  const api = await load('embedded.js', { ...browser, ...channel, location: { ...location, hash: `#bridge=${'b'.repeat(32)}` }, ...extraGlobals });
+  const waiting = api.waitForEmbeddedConfig();
+  const connection = { homeyUrl: location.origin, token: 'embedded-channel', transport: 'broker', screenId: 'native-channel' };
+  transferred.postMessage({ type: 'dashboard:connect', config: connection });
+  await waiting;
+  return { ...browser, api, port: transferred, pairs: channel.pairs, connection };
+}
+
+test('opaque settings use only a wildcard noncredential challenge and keep configuration and events on the transferred port', async () => {
+  const frame = await channelFrame();
+  assert.equal(frame.api.usesEmbeddedBroker(), true);
+  assert.deepEqual(structuredClone(frame.sent), [{ message: { type: 'dashboard:ready', nonce: 'b'.repeat(32) }, origin: '*' }]);
+  assert.equal(JSON.stringify(frame.sent).includes('embedded-channel'), false);
+  frame.api.notifyEmbedded('connected');
+  assert.equal(frame.pairs[0].port1.sent.at(-1).type, 'dashboard:connected');
+  frame.port.postMessage({ type: 'dashboard:visibility', visible: false });
+  await new Promise(setImmediate);
+  assert.equal(frame.api.isDashboardVisible(), false);
+  frame.windowEvents.get('message')({ source: frame.parent, origin: location.origin, data: { type: 'dashboard:visibility', visible: true } });
+  assert.equal(frame.api.isDashboardVisible(), false, 'window messages cannot bypass the private channel');
+});
+
+test('nonce-bearing frames fail closed for malformed or duplicate fragments and missing MessageChannel', async () => {
+  for (const hash of ['#bridge=short', `#bridge=${'c'.repeat(32)}&bridge=${'d'.repeat(32)}`]) {
+    const browser = embeddedBrowser();
+    const api = await load('embedded.js', { ...browser, ...channels(), location: { ...location, hash } });
+    await assert.rejects(api.waitForEmbeddedConfig(), /connection is unavailable/);
+    assert.equal(browser.sent.length, 0);
+  }
+  const browser = embeddedBrowser();
+  const api = await load('embedded.js', { ...browser, location: { ...location, hash: `#bridge=${'c'.repeat(32)}` } });
+  await assert.rejects(api.waitForEmbeddedConfig(), /connection is unavailable/);
+  assert.equal(browser.sent.length, 0);
+});
+
+test('private-channel requests use numeric IDs, drop claimed tokens, preserve errors, and ignore aborted responses', async () => {
+  const frame = await channelFrame();
+  const seen = [];
+  frame.port.onmessage = ({ data }) => {
+    seen.push(data);
+    if (data.body.path === '/denied') frame.port.postMessage({ type: 'dashboard:response', id: data.id, ok: false, error: { message: 'Denied', status: 403 } });
+    else if (data.body.path !== '/abort') frame.port.postMessage({ type: 'dashboard:response', id: data.id, ok: true, value: { saved: true } });
+  };
+  const result = await frame.api.requestEmbeddedBroker('request', { method: 'GET', path: '/native', token: 'spoofed' });
+  assert.equal(result.saved, true);
+  assert.equal(Number.isSafeInteger(seen[0].id), true);
+  assert.equal(seen[0].id > 0, true);
+  assert.equal(Object.hasOwn(seen[0].body, 'token'), false);
+  await assert.rejects(frame.api.requestEmbeddedBroker('request', { method: 'GET', path: '/denied' }), (error) => error.status === 403 && error.message === 'Denied');
+  const abort = new AbortController();
+  const request = frame.api.requestEmbeddedBroker('request', { method: 'GET', path: '/abort' }, { signal: abort.signal });
+  const rejected = assert.rejects(request, (error) => error.name === 'AbortError');
+  await new Promise(setImmediate);
+  const abortedId = seen.at(-1).id;
+  abort.abort();
+  await rejected;
+  frame.port.postMessage({ type: 'dashboard:response', id: abortedId, ok: true, value: { stale: true } });
+  assert.equal((await frame.api.requestEmbeddedBroker('request', { method: 'GET', path: '/native' })).saved, true);
+});
+
+test('private-channel requests have a bounded timeout and never fall back to fetch', async () => {
+  let timeout;
+  const frame = await channelFrame({
+    setTimeout(callback, delay) { if (delay === 20000) { timeout = callback; return 1; } return setTimeout(callback, delay); },
+    clearTimeout(id) { if (id !== 1) clearTimeout(id); },
+  });
+  const request = frame.api.requestEmbeddedBroker('events', { subscriptions: [] });
+  const rejected = assert.rejects(request, (error) => error.status === 504 && /Check the device/.test(error.message));
+  timeout();
+  await rejected;
+  frame.windowEvents.get('pagehide')();
+  await assert.rejects(frame.api.requestEmbeddedBroker('request', { method: 'GET', path: '/native' }), (error) => error.status === 401);
+});
+
+test('actual child broker requests are accepted by the actual opaque Homey settings controller', async () => {
+  const origin = 'http://192.168.1.20:4859';
+  const appId = 'dev.schweiger.dashboard';
+  const nodes = new Map();
+  class Target {
+    constructor() { this.listeners = new Map(); this.attributes = new Map(); this.dataset = {}; }
+    addEventListener(type, listener) { this.listeners.set(type, listener); }
+    setAttribute(name, value) { this.attributes.set(name, value); }
+    getAttribute(name) { return this.attributes.get(name); }
+    hasAttribute(name) { return this.attributes.has(name); }
+    set src(value) { this.setAttribute('src', value); }
+    get src() { return this.getAttribute('src'); }
+  }
+  const node = (id) => { if (!nodes.has(id)) { const item = new Target(); item.id = id; nodes.set(id, item); } return nodes.get(id); };
+  for (const name of ['dashboard', 'connection']) node(`${name}-tab`).setAttribute('aria-controls', `${name}-panel`);
+  const browser = embeddedBrowser(`${origin}/app/${appId}/settings/index.html`);
+  const parent = new Target();
+  parent.location = new URL(`${origin}/app/${appId}/settings/index.html`);
+  parent.origin = 'null';
+  parent.crypto = { getRandomValues: (bytes) => { bytes.fill(0x5a); return bytes; } };
+  parent.postMessage = (data, target, ports) => {
+    assert.equal(target, '*', 'opaque parents cannot receive messages targeted at their URL-shaped referrer');
+    parent.listeners.get('message')({ source: browser.window, origin: 'null', data, ports });
+  };
+  browser.window.parent = parent;
+  const parentDocument = { getElementById: node, visibilityState: 'visible', addEventListener() {} };
+  node('workspace-frame').contentWindow = browser.window;
+  const calls = [];
+  const parentContext = vm.createContext({ window: parent, document: parentDocument, URL, setTimeout, clearTimeout });
+  const controllerSource = await readFile(new URL('../settings/workspace.js', import.meta.url), 'utf8');
+  vm.runInContext(controllerSource, parentContext);
+  const controller = parentContext.createDashboardWorkspace({
+    api(method, route, body, callback) {
+      calls.push({ method, route, body });
+      if (route === '/workspace/connect') callback(null, { token: 'parent-only-session', transport: 'broker', screenId: 'native-parent' });
+      else callback(null, { id: 'actual-native-dashboard' });
+    },
+  });
+  controller.setAddress(`${origin}/app/${appId}/assets/web/index.html`);
+  const childUrl = new URL(node('workspace-frame').src);
+  const childLocation = { origin: childUrl.origin, pathname: childUrl.pathname, search: childUrl.search, hash: childUrl.hash };
+  const child = await load('embedded.js', { ...browser, ...channels(), location: childLocation });
+  const config = await child.waitForEmbeddedConfig();
+  assert.equal(config.token, 'embedded-channel');
+  const { createClient } = await load('homey-api.js', { location: childLocation, fetch: () => assert.fail('embedded channel must never fetch') }, {
+    './embedded.js': { usesEmbeddedBroker: child.usesEmbeddedBroker, requestEmbeddedBroker: child.requestEmbeddedBroker },
+  });
+  const dashboard = await createClient(config).api('GET', '/api/manager/dashboards/dashboard');
+  assert.equal(dashboard.id, 'actual-native-dashboard');
+  assert.equal(calls.at(-1).route, '/workspace/request');
+  assert.equal(calls.at(-1).body.token, 'parent-only-session');
+  assert.equal(calls.at(-1).body.path, '/api/manager/dashboards/dashboard');
+  parent.listeners.get('pagehide')();
+  browser.windowEvents.get('pagehide')();
 });
 
 test('legacy browser configuration migrates to the database without modifying localStorage', async () => {

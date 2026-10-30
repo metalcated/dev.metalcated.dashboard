@@ -12,11 +12,12 @@ const ORIGIN = new URL(ADDRESS).origin;
 
 // A small app-view host: tests run the actual controller and observe its security boundary, asynchronous connection
 // callbacks, and visibility events. It intentionally has no browser storage or real network implementation.
-function workspace({ settingsUrl = 'https://my.homey.app/' } = {}) {
+function workspace({ settingsUrl = 'https://my.homey.app/', opaqueOrigin = false } = {}) {
   const timers = new Map();
   const calls = [];
   const sent = [];
   const opened = [];
+  let lastPort = null;
   let nextTimer = 1;
   let document;
 
@@ -67,6 +68,9 @@ function workspace({ settingsUrl = 'https://my.homey.app/' } = {}) {
   document.getElementById = node;
   const window = new Target();
   window.location = new URL(settingsUrl);
+  window.origin = opaqueOrigin ? 'null' : window.location.origin;
+  let nextNonce = 1;
+  window.crypto = { getRandomValues(bytes) { bytes.fill(nextNonce++); return bytes; } };
   const Homey = {
     api(method, route, body, callback) { calls.push({ method, route, body, callback }); },
     openURL(url) { opened.push(url); },
@@ -85,8 +89,15 @@ function workspace({ settingsUrl = 'https://my.homey.app/' } = {}) {
   const controller = context.createDashboardWorkspace(Homey);
   return {
     controller, node, frame, window, document, calls, sent, opened, timers,
-    ready(extra = {}) { window.emit('message', { source: frame.contentWindow, origin: ORIGIN, data: { type: 'dashboard:ready' }, ...extra }); },
-    error(message) { window.emit('message', { source: frame.contentWindow, origin: ORIGIN, data: { type: 'dashboard:error', message } }); },
+    ready(extra = {}) {
+      const nonce = new URLSearchParams(new URL(frame.src).hash.slice(1)).get('bridge');
+      lastPort = extra.ports?.[0] ?? {
+        postMessage(message) { sent.push({ message, origin: new URL(controller.address()).origin }); },
+        start() {}, close() {},
+      };
+      window.emit('message', { source: frame.contentWindow, origin: ORIGIN, data: { type: 'dashboard:ready', nonce }, ports: [lastPort], ...extra });
+    },
+    error(message) { lastPort?.onmessage?.({ data: { type: 'dashboard:error', message } }); },
     runTimer(delay) {
       const found = [...timers].find(([, timer]) => timer.delay === delay);
       assert.ok(found, `expected ${delay} ms timer`);
@@ -105,6 +116,7 @@ test('only the expected dashboard frame and exact origin can request automatic c
   host.ready({ source: {} });
   host.ready({ origin: 'https://attacker.example' });
   host.ready({ origin: 'null' });
+  host.ready({ data: { type: 'dashboard:ready' }, ports: [] });
   assert.equal(host.calls.length, 0);
   host.ready();
   assert.equal(host.calls.length, 1);
@@ -115,7 +127,7 @@ test('only the expected dashboard frame and exact origin can request automatic c
   assert.equal(connections(host).length, 1);
   const sent = connections(host)[0];
   assert.equal(sent.origin, ORIGIN);
-  assert.equal(sent.message.config.token, approved.token);
+  assert.equal(sent.message.config.token, 'embedded-channel');
   assert.equal(sent.message.config.screenId, approved.screenId);
   assert.equal(sent.message.config.homeyUrl, ORIGIN);
   assert.equal(new URL(host.frame.src).search, '?embedded=1');
@@ -234,7 +246,7 @@ test('a working LAN app-settings origin avoids the generated DNS name and keeps 
   const host = workspace({ settingsUrl: `${origin}/app/dev.schweiger.dashboard/settings/` });
   host.controller.setAddress('https://192-168-80-87.homey.homeylocal.com:4860/app/dev.schweiger.dashboard/assets/web/index.html');
   assert.equal(host.controller.address(), `${origin}/app/dev.schweiger.dashboard/assets/web/index.html`);
-  assert.equal(host.frame.src, `${host.controller.address()}?embedded=1`);
+  assert.equal(host.frame.src.split('#')[0], `${host.controller.address()}?embedded=1`);
   host.ready(); // The failed generated hostname is no longer an accepted sender.
   assert.equal(host.calls.length, 0);
   host.ready({ origin });
@@ -272,4 +284,112 @@ test('cloud settings and unrelated/private-origin pages cannot change the valida
   host.controller.setAddress('https://attacker.example/app/dev.schweiger.dashboard/assets/web/index.html');
   assert.equal(host.controller.address(), null, 'the source address must still pass the original destination checks');
   assert.equal(host.frame.hasAttribute('src'), false);
+});
+
+function openChannel(host, changes = {}) {
+  const port = {
+    sent: [], closed: false,
+    postMessage(message) { this.sent.push(message); },
+    start() { this.started = true; },
+    close() { this.closed = true; },
+    emit(data) { this.onmessage?.({ data }); },
+  };
+  const nonce = new URLSearchParams(new URL(host.frame.src).hash.slice(1)).get('bridge');
+  host.ready({ origin: 'null', data: { type: 'dashboard:ready', nonce }, ports: [port], ...changes });
+  return port;
+}
+
+test('an opaque Homey settings view binds only its current iframe and nonce to a private channel', () => {
+  const host = workspace({ opaqueOrigin: true });
+  host.controller.setAddress(ADDRESS);
+  const nonce = new URLSearchParams(new URL(host.frame.src).hash.slice(1)).get('bridge');
+  assert.match(nonce, /^[a-f0-9]{32}$/);
+  openChannel(host, { source: {} });
+  openChannel(host, { data: { type: 'dashboard:ready', nonce: 'a'.repeat(32) } });
+  openChannel(host, { origin: 'https://attacker.example' });
+  host.ready({ origin: 'null', data: { type: 'dashboard:ready' }, ports: [] });
+  assert.equal(host.calls.length, 0);
+  const port = openChannel(host);
+  assert.equal(host.calls.length, 1);
+  host.calls[0].callback(null, approved);
+  const connection = port.sent.find((message) => message.type === 'dashboard:connect');
+  assert.equal(connection.config.token, 'embedded-channel', 'the real broker credential stays in the signed-in settings frame');
+  assert.ok(!JSON.stringify(port.sent).includes(approved.token));
+  assert.equal(host.sent.length, 0, 'opaque-origin connections never send credentials using window.postMessage');
+  assert.equal(port.started, true);
+
+  const normal = workspace();
+  normal.controller.setAddress(ADDRESS);
+  openChannel(normal);
+  assert.equal(normal.calls.length, 0, 'a normal-origin parent must not accept opaque-origin senders');
+});
+
+test('the private channel forwards only bounded broker requests with the parent session and preserves errors', () => {
+  const host = workspace({ opaqueOrigin: true });
+  host.controller.setAddress(ADDRESS);
+  const port = openChannel(host);
+  host.calls[0].callback(null, approved);
+  port.emit({ type: 'dashboard:request', id: 1, route: 'request', body: { method: 'GET', path: '/api/manager/dashboards/dashboard', token: 'injected-key' } });
+  assert.equal(host.calls[1].route, '/workspace/request');
+  assert.equal(host.calls[1].body.token, approved.token);
+  host.calls[1].callback(null, { dashboard: 'shared-mobile-layout' });
+  assert.equal(port.sent.at(-1).value.dashboard, 'shared-mobile-layout');
+  port.emit({ type: 'dashboard:request', id: 2, route: 'events', body: { subscriptions: [] } });
+  host.calls[2].callback(Object.assign(new Error('Connection revoked'), { statusCode: 401 }));
+  assert.equal(port.sent.at(-1).error.status, 401);
+  assert.equal(port.sent.at(-1).error.message, 'Connection revoked');
+  for (const request of [
+    { id: 3, route: '/api-key', body: {} },
+    { id: 4, route: 'request', body: [] },
+    { id: 5, route: 'request', body: { text: 'x'.repeat(1024 * 1024) } },
+  ]) port.emit({ type: 'dashboard:request', ...request });
+  assert.equal(host.calls.length, 3, 'invalid calls never enter the signed Homey SDK channel');
+  assert.equal(port.sent.at(-1).error.status, 400);
+  host.node('connection-tab').emit('click');
+  assert.equal(port.sent.at(-1).type, 'dashboard:visibility');
+  assert.equal(port.sent.at(-1).visible, false);
+});
+
+test('reload closes the old port, changes its nonce, and ignores old request replies', () => {
+  const host = workspace({ opaqueOrigin: true });
+  host.controller.setAddress(ADDRESS);
+  const first = openChannel(host);
+  host.calls[0].callback(null, approved);
+  const oldNonce = new URL(host.frame.src).hash;
+  first.emit({ type: 'dashboard:request', id: 1, route: 'request', body: { method: 'GET', path: '/api/manager/dashboards/dashboard' } });
+  const oldRequest = host.calls[1];
+  host.node('workspace-reload').emit('click');
+  assert.equal(first.closed, true);
+  assert.notEqual(new URL(host.frame.src).hash, oldNonce);
+  oldRequest.callback(null, { stale: true });
+  assert.equal(first.sent.some((message) => message.type === 'dashboard:response'), false);
+  const second = openChannel(host);
+  host.calls[2].callback(null, approved);
+  second.emit({ type: 'dashboard:request', id: 1, route: 'events', body: { subscriptions: [] } });
+  host.runTimer(25000);
+  assert.equal(second.sent.at(-1).error.status, 504);
+  const replies = second.sent.length;
+  host.calls[3].callback(null, { late: true });
+  assert.equal(second.sent.length, replies);
+  host.window.emit('pagehide');
+  assert.equal(second.closed, true);
+});
+
+test('opaque connection-list refresh pauses outside its tab and disposes with the app view', () => {
+  const host = workspace({ opaqueOrigin: true });
+  let refreshed = 0;
+  host.controller.keepConnectionsUpdated(() => refreshed++);
+  host.runTimer(3000);
+  assert.equal(refreshed, 0);
+  host.node('connection-tab').emit('click');
+  host.runTimer(3000);
+  assert.equal(refreshed, 1);
+  host.document.visibilityState = 'hidden';
+  host.runTimer(3000);
+  assert.equal(refreshed, 1);
+  host.window.emit('pagehide');
+  assert.equal(host.timers.size, 0);
+  const normal = workspace();
+  normal.controller.keepConnectionsUpdated(() => assert.fail('native realtime must remain in use'));
+  assert.equal(normal.timers.size, 0);
 });

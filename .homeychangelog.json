@@ -28,5 +28,8 @@
   },
   "1.4.3": {
     "en": "Automatic connection also works when the browser omits the embedded dashboard referrer, after verifying the same-origin Homey app settings page."
+  },
+  "1.4.4": {
+    "en": "Homey web app settings now connect through a private per-visit channel, supporting Homey’s restricted app frames without browser API credentials or manual setup."
   }
 }

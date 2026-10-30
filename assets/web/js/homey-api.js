@@ -1,4 +1,5 @@
 // Minimal client for the Homey Web API.
+import { usesEmbeddedBroker, requestEmbeddedBroker } from './embedded.js';
 
 export function createClient({ homeyUrl, token, transport, appId }) {
   const base = homeyUrl.trim().replace(/\/+$/, '');
@@ -24,6 +25,7 @@ export function createClient({ homeyUrl, token, transport, appId }) {
   }
 
   async function broker(route, payload, { signal } = {}) {
+    if (usesEmbeddedBroker()) return requestEmbeddedBroker(route, payload, { signal });
     return readResponse(await fetch(`${base}/api/app/${encodeURIComponent(id)}/workspace/${route}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

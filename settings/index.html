@@ -141,6 +141,12 @@
         var keyCheck = document.getElementById('key-check');
         var dashboardUrl = null;
         var automaticConnection = false;
+        var settingsDisposed = false;
+        var pairingsLoading = false;
+        var screensLoading = false;
+        var lastPairings = null;
+        var lastScreensResponse = null;
+        window.addEventListener('pagehide', function () { settingsDisposed = true; }, { once: true });
 
         Homey.get('dashboardUrl', function (err, value) {
           if (err) return workspace.showError(err.message || String(err));
@@ -286,14 +292,21 @@
         }
 
         function loadPairings() {
+          if (settingsDisposed || pairingsLoading) return;
+          pairingsLoading = true;
           Homey.api('GET', '/pairings', null, function (err, pairings) {
+            pairingsLoading = false;
+            if (settingsDisposed) return;
             if (err) return Homey.alert(err.message || String(err));
+            var signature = JSON.stringify(pairings);
+            if (signature === lastPairings) return;
+            lastPairings = signature;
             renderPairings(pairings);
           });
         }
 
         // The app announces every change, so a code shows up here as soon as a browser asks.
-        Homey.on('pairings', renderPairings);
+        if (window.origin !== 'null') Homey.on('pairings', renderPairings);
         loadPairings();
 
         // ----- Screens -----
@@ -421,10 +434,24 @@
           return row;
         }
 
-        Homey.on('screens', renderScreens);
-        Homey.api('GET', '/screens', null, function (err, screens) {
-          if (err) return Homey.alert(err.message || String(err));
-          renderScreens(screens);
+        function loadScreens() {
+          if (settingsDisposed || screensLoading) return;
+          screensLoading = true;
+          Homey.api('GET', '/screens', null, function (err, screens) {
+            screensLoading = false;
+            if (settingsDisposed) return;
+            if (err) return Homey.alert(err.message || String(err));
+            var signature = JSON.stringify(screens);
+            if (signature === lastScreensResponse) return;
+            lastScreensResponse = signature;
+            renderScreens(screens);
+          });
+        }
+        if (window.origin !== 'null') Homey.on('screens', renderScreens);
+        loadScreens();
+        workspace.keepConnectionsUpdated(function () {
+          loadPairings();
+          loadScreens();
         });
 
         // ----- API key -----

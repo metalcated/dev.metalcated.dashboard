@@ -37,6 +37,19 @@ function createDashboardWorkspace(Homey) {
   let loadTimer = null;
   let attempt = 0;
   let identity = null;
+  let bridgeNonce = null;
+  let bridgePort = null;
+  let bridgeSession = null;
+  const bridgeRequests = new Map();
+
+  function closeBridge() {
+    bridgePort?.close();
+    bridgePort = null;
+    bridgeSession = null;
+    for (const timer of bridgeRequests.values()) clearTimeout(timer);
+    bridgeRequests.clear();
+    bridgeNonce = null;
+  }
 
   function screenIdentity() {
     if (identity) return identity;
@@ -89,7 +102,51 @@ function createDashboardWorkspace(Homey) {
 
   function post(type, extra = {}) {
     if (!address || !frame.contentWindow || !frame.hasAttribute('src')) return;
+    if (bridgePort) {
+      bridgePort.postMessage({ type, ...extra });
+      return;
+    }
     frame.contentWindow.postMessage({ type, ...extra }, new URL(address).origin);
+  }
+
+  function dashboardMessage(data) {
+    if (data?.type === 'dashboard:error') {
+      clearTimeout(loadTimer);
+      attempt += 1;
+      bridgeSession = null;
+      showStatus(data.message || 'The connection was lost. Reload to connect again.', true);
+    }
+  }
+
+  function bridgeRequest(port, data) {
+    if (!Number.isSafeInteger(data.id) || data.id < 1 || data.id > 2147483647) return;
+    const reply = (value) => { if (port === bridgePort) port.postMessage({ type: 'dashboard:response', id: data.id, ...value }); };
+    if (!bridgeSession) return reply({ ok: false, error: { message: 'Reload the dashboard to connect again.', status: 401 } });
+    let size;
+    try { size = JSON.stringify(data.body).length; } catch { size = Infinity; }
+    if (!['request', 'events'].includes(data.route) || !data.body || typeof data.body !== 'object'
+      || Array.isArray(data.body) || size > 1024 * 1024) {
+      return reply({ ok: false, error: { message: 'Unsupported dashboard request.', status: 400 } });
+    }
+    if (bridgeRequests.has(data.id) || bridgeRequests.size >= 32) {
+      return reply({ ok: false, error: { message: 'Too many dashboard requests. Try again.', status: 429 } });
+    }
+    const timer = setTimeout(() => {
+      if (port !== bridgePort || !bridgeRequests.has(data.id)) return;
+      bridgeRequests.delete(data.id);
+      reply({ ok: false, error: { message: 'Homey has not answered yet. Check the device before trying again.', status: 504 } });
+    }, 25000);
+    bridgeRequests.set(data.id, timer);
+    const session = bridgeSession;
+    // Homey's web app deliberately gives app settings an opaque origin. Its signed-in SDK channel can still reach
+    // our two constrained broker endpoints; the frame cannot choose an app-administration route or another token.
+    Homey.api('POST', `/workspace/${data.route}`, { ...data.body, token: session.token }, (error, value) => {
+      if (port !== bridgePort || session !== bridgeSession || !bridgeRequests.has(data.id)) return;
+      clearTimeout(timer);
+      bridgeRequests.delete(data.id);
+      if (error) reply({ ok: false, error: { message: error.message || 'Homey could not complete the request.', status: error.statusCode ?? error.status } });
+      else reply({ ok: true, value });
+    });
   }
 
   function visibility() {
@@ -111,10 +168,14 @@ function createDashboardWorkspace(Homey) {
   function load() {
     if (!address) return;
     attempt += 1;
+    closeBridge();
     clearTimeout(loadTimer);
     showStatus('Opening your dashboards…');
     const url = new URL(address);
     url.searchParams.set('embedded', '1');
+    bridgeNonce = Array.from(window.crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+    // This per-visit handshake value is not an API credential. The fragment stays out of HTTP requests/referrers.
+    url.hash = `bridge=${bridgeNonce}`;
     frame.hidden = false;
     frame.src = url.href;
     loadTimer = setTimeout(() => {
@@ -140,8 +201,9 @@ function createDashboardWorkspace(Homey) {
         showStatus(error?.message || 'Automatic connection could not start. Reload the dashboard to try again.', true);
         return;
       }
+      bridgeSession = connection;
       post('dashboard:connect', { config: {
-        token: connection.token,
+        token: bridgePort ? 'embedded-channel' : connection.token,
         transport: 'broker',
         screenId: connection.screenId,
         homeyUrl: new URL(address).origin,
@@ -164,14 +226,28 @@ function createDashboardWorkspace(Homey) {
   }
 
   window.addEventListener('message', (event) => {
-    if (!address || event.source !== frame.contentWindow || event.origin !== new URL(address).origin) return;
-    if (event.data?.type === 'dashboard:ready') connect();
-    if (event.data?.type === 'dashboard:error') {
-      clearTimeout(loadTimer);
-      attempt += 1;
-      showStatus(event.data.message || 'The connection was lost. Reload to connect again.', true);
+    if (!address || event.source !== frame.contentWindow) return;
+    const expectedOrigin = new URL(address).origin;
+    if (event.data?.type === 'dashboard:ready' && (event.data.nonce !== undefined || event.ports?.length)) {
+      if (event.data.nonce !== bridgeNonce || !bridgeNonce || event.ports?.length !== 1) return;
+      if (event.origin !== expectedOrigin && !(event.origin === 'null' && window.origin === 'null')) return;
+      const port = event.ports[0];
+      if (bridgePort) { port.close(); return; }
+      bridgePort = port;
+      port.onmessage = ({ data }) => {
+        if (port !== bridgePort) return;
+        if (data?.type === 'dashboard:request') bridgeRequest(port, data);
+        else dashboardMessage(data);
+      };
+      port.start();
+      connect();
+      return;
     }
+    if (bridgeNonce || event.origin !== expectedOrigin || bridgePort) return;
+    if (event.data?.type === 'dashboard:ready') connect();
+    dashboardMessage(event.data);
   });
+  window.addEventListener('pagehide', closeBridge);
   document.addEventListener('visibilitychange', visibility);
   frame.addEventListener('load', visibility);
   reload.addEventListener('click', load);
@@ -184,6 +260,20 @@ function createDashboardWorkspace(Homey) {
   return {
     address: () => address,
     showError: (message) => showStatus(message, true),
+    keepConnectionsUpdated(refresh) {
+      if (window.origin !== 'null') return;
+      // Homey's web shell cannot attach app realtime listeners from its opaque settings frame. Refresh its small
+      // connection lists only while visible; the native app retains the SDK's existing realtime subscriptions.
+      let disposed = false;
+      let timer;
+      const poll = () => {
+        if (disposed) return;
+        if (active === 'connection' && document.visibilityState !== 'hidden') refresh();
+        timer = setTimeout(poll, 3000);
+      };
+      poll();
+      window.addEventListener('pagehide', () => { disposed = true; clearTimeout(timer); }, { once: true });
+    },
     openDashboard() {
       select('dashboard');
       if (address && !frame.hasAttribute('src')) load();
