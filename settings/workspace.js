@@ -190,10 +190,16 @@ function createDashboardWorkspace(Homey) {
     const currentAttempt = ++attempt;
     clearTimeout(loadTimer);
     showStatus('Connecting to Homey…');
+    const failed = (message) => {
+      showStatus(message, true);
+      // Stop the child waiting for configuration too. Otherwise its later generic timeout would replace Homey's
+      // useful authorization error and leave the two views describing different failures.
+      post('dashboard:error', { message });
+    };
     loadTimer = setTimeout(() => {
       if (currentAttempt !== attempt) return;
       attempt += 1;
-      showStatus('Homey has not answered yet. Reload the dashboard to try again.', true);
+      failed('Homey has not answered yet. Reload the dashboard to try again.');
     }, 12000);
     // Homey signs this request with the existing app session. The response contains only a restricted dashboard
     // connection, never Homey's owner API token; the frame keeps it in memory for this visit.
@@ -201,7 +207,7 @@ function createDashboardWorkspace(Homey) {
       if (currentAttempt !== attempt) return;
       clearTimeout(loadTimer);
       if (error || !connection?.token || connection.transport !== 'broker') {
-        showStatus(error?.message || 'Automatic connection could not start. Reload the dashboard to try again.', true);
+        failed(error?.message || 'Automatic connection could not start. Reload the dashboard to try again.');
         return;
       }
       bridgeSession = connection;

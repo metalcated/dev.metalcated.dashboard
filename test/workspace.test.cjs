@@ -188,6 +188,8 @@ test('connection failures and malformed responses keep an actionable error witho
     assert.equal(connections(host).length, 0);
     assert.equal(host.node('workspace-status').hidden, false);
     assert.equal(host.node('workspace-status').dataset.error, 'true');
+    assert.equal(host.sent.at(-1).message.type, 'dashboard:error');
+    assert.match(host.sent.at(-1).message.message, /permission required|could not start/);
   }
 });
 

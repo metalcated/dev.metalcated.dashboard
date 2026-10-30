@@ -40,5 +40,8 @@
   },
   "1.4.7": {
     "en": "Reload creates a new embedded page and private connection instead of changing only its fragment, so a failed connection can start again correctly."
+  },
+  "1.4.8": {
+    "en": "The embedded page receives Homey’s authorization failure immediately, preserving the useful reason instead of replacing it with a later generic connection timeout."
   }
 }
