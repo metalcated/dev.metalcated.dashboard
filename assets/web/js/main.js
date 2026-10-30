@@ -2,7 +2,8 @@
 
 import { APP_ID, loadConfig, servedByHomey, writeStoredConfig } from './config.js';
 import { isSaving, loadKeyScopes } from './dashboard-save.js';
-import { initEditMode } from './edit-mode.js';
+import { initEditMode, setEditing } from './edit-mode.js';
+import { embedded, notifyEmbedded } from './embedded.js';
 import { initFit, isFit, setFit } from './fit.js';
 import { $, darkQuery, el } from './dom.js';
 import { DASHBOARD_ICON } from './icons.js';
@@ -12,10 +13,13 @@ import { initKiosk, isKiosk, kioskHome, resetIdle, screenState, setKiosk, settle
 import { createPairing } from './pairing.js';
 import { createRealtime, loadScript } from './realtime.js';
 import { redrawWidgets, renderDashboard, updateBoard } from './render.js';
-import { registerScreen, screenId, watchScreen } from './screen.js';
+import { adoptScreenId, registerScreen, screenId, watchScreen } from './screen.js';
 import { STORAGE_KEY, params, state } from './state.js';
 import { checkForUpdate, watchUpdates } from './updates.js';
 import { loadWidgetModes, watchWidgetModes } from './widget-modes.js';
+
+let connectionGeneration = 0;
+const currentConnection = (client, generation) => generation === connectionGeneration && state.client === client;
 
 // The dashboard name is the switch: it lists the dashboards, the shown one highlighted. Not in kiosk mode.
 function populateDashboardMenu() {
@@ -34,6 +38,32 @@ function populateDashboardMenu() {
     return item;
   }));
   $('dashboard-switch').toggleAttribute('data-single', dashboards.length < 2);
+  populateDashboardNavigation(dashboards);
+}
+
+// Desktop navigation shares the same dashboard list and switch path as the title picker. Rebuilding the list after
+// a live rename or edit keeps keyboard focus on its dashboard, without touching the board's widgets.
+function populateDashboardNavigation(dashboards) {
+  const navigation = $('dashboard-navigation');
+  const focusedId = navigation.contains(document.activeElement) ? document.activeElement.dataset.dashboardId : null;
+  navigation.replaceChildren(...dashboards.map((dashboard) => {
+    const item = el('button', 'dashboard-navigation-item');
+    item.type = 'button';
+    item.dataset.dashboardId = dashboard.id;
+    item.title = dashboard.name;
+    item.innerHTML = DASHBOARD_ICON;
+    item.querySelector('svg')?.setAttribute('aria-hidden', 'true');
+    item.append(el('span', null, dashboard.name));
+    if (dashboard.id === state.dashboardId) item.setAttribute('aria-current', 'page');
+    item.addEventListener('click', () => {
+      toggleDashboardMenu(false);
+      if (dashboard.id !== state.dashboardId) showDashboard(dashboard.id);
+    });
+    return item;
+  }));
+  $('dashboard-sidebar').hidden = dashboards.length === 0;
+  document.body.classList.toggle('has-dashboard-navigation', dashboards.length > 0);
+  if (focusedId) [...navigation.children].find((item) => item.dataset.dashboardId === focusedId)?.focus({ preventScroll: true });
 }
 
 function toggleDashboardMenu(open = $('dashboard-menu').hidden) {
@@ -61,17 +91,28 @@ function chooseDashboard() {
   state.dashboardId = (match(requested) ?? match(state.dashboardId) ?? match(kioskHome()) ?? match(remembered) ?? dashboards[0])?.id ?? null;
 }
 
-async function refreshAll() {
-  const [dashboards, me] = await Promise.all([
-    state.client.api('GET', '/api/manager/dashboards/dashboard'),
-    state.client.api('GET', '/api/manager/users/user/me').catch(() => null),
-  ]);
+async function refreshAll(client = state.client, generation = connectionGeneration) {
+  if (!currentConnection(client, generation) || client == null) return false;
+  let dashboards;
+  let me;
+  try {
+    [dashboards, me] = await Promise.all([
+      client.api('GET', '/api/manager/dashboards/dashboard'),
+      client.api('GET', '/api/manager/users/user/me').catch(() => null),
+    ]);
+  } catch (error) {
+    if (!currentConnection(client, generation)) return false;
+    throw error;
+  }
+  if (!currentConnection(client, generation)) return false;
   state.dashboards = dashboards ?? {};
   state.me = me;
   chooseDashboard();
   populateDashboardMenu();
   await renderDashboard();
+  if (!currentConnection(client, generation)) return false;
   showHighlight();
+  return true;
 }
 
 function setStatus(stateName, text) {
@@ -95,14 +136,21 @@ function onDashboardChange(dashboard) {
   else if (isShownOrLinked(dashboard.id)) renderDashboard();
   showHighlight();
 }
-document.addEventListener('dashboard-saved', (event) => onDashboardChange(event.detail));
+document.addEventListener('dashboard-saved', (event) => {
+  if (state.client && state.config?.token) onDashboardChange(event.detail);
+});
 
-function watchHomey() {
-  state.realtime.on('homey:manager:dashboards', 'dashboard.create', onDashboardChange);
-  state.realtime.on('homey:manager:dashboards', 'dashboard.update', (dashboard) => {
-    if (!isSaving(dashboard?.id)) onDashboardChange(dashboard);
+function watchHomey(client, generation) {
+  const realtime = state.realtime;
+  const current = () => currentConnection(client, generation);
+  realtime.on('homey:manager:dashboards', 'dashboard.create', (dashboard) => {
+    if (current()) onDashboardChange(dashboard);
   });
-  state.realtime.on('homey:manager:dashboards', 'dashboard.delete', ({ id }) => {
+  realtime.on('homey:manager:dashboards', 'dashboard.update', (dashboard) => {
+    if (current() && !isSaving(dashboard?.id)) onDashboardChange(dashboard);
+  });
+  realtime.on('homey:manager:dashboards', 'dashboard.delete', ({ id }) => {
+    if (!current()) return;
     delete state.dashboards[id];
     const wasShownOrLinked = isShownOrLinked(id);
     chooseDashboard();
@@ -113,7 +161,8 @@ function watchHomey() {
   // The "Show a dashboard" flow card, for every screen or this one. A kiosk tablet counts it as a touch, so it stays
   // two minutes before going home.
   if (servedByHomey) {
-    state.realtime.on(`homey:app:${APP_ID}`, 'show-dashboard', (data) => {
+    realtime.on(`homey:app:${APP_ID}`, 'show-dashboard', (data) => {
+      if (!current()) return;
       if (data?.screenId !== 'all' && data?.screenId !== screenId()) return;
       resetIdle();
       showDashboard(data?.dashboardId);
@@ -122,22 +171,28 @@ function watchHomey() {
   // A widget on this dashboard that is to run another way (sandboxed, with storage or trusted) is loaded again.
   watchWidgetModes(redrawWidgets);
   // Favorites live on the user, so re-render when they change in the mobile app.
-  state.realtime.on('homey:manager:users', 'user.update', async (user) => {
-    if (user?.id !== state.me?.id) return;
-    state.me = await state.client.api('GET', '/api/manager/users/user/me').catch(() => state.me);
+  realtime.on('homey:manager:users', 'user.update', async (user) => {
+    if (!current() || user?.id !== state.me?.id) return;
+    const me = await client.api('GET', '/api/manager/users/user/me').catch(() => null);
+    if (!current()) return;
+    state.me = me ?? state.me;
     renderDashboard();
   });
 }
 
 const pairing = createPairing({
-  onApproved(token, purpose) {
+  async onApproved(token, purpose, result) {
     if (purpose === 'unlock') {
       resetIdle();
       openSetup();
       return;
     }
-    writeStoredConfig({ token });
-    location.reload();
+    const generation = connectionGeneration;
+    const connection = { token, ...(result.transport ? { transport: result.transport } : {}), ...(result.screenId ? { screenId: result.screenId } : {}) };
+    await writeStoredConfig(connection);
+    if (generation !== connectionGeneration) return;
+    $('setup').close();
+    await boot({ ...connection, homeyUrl: location.origin });
   },
 });
 
@@ -181,9 +236,11 @@ function kioskIdle() {
 
 function openSetup(errorText) {
   const config = state.config ?? {};
+  if (embedded && !config.token) return showEmbeddedFailure(errorText ?? 'Use Retry in the Homey dashboard view to reconnect.');
   showSetupMode(servedByHomey && !config.token ? 'pairing' : 'key');
   // Once dashboards are showing, this is the browser's settings rather than a connection form.
-  const connected = state.dashboardId != null && Boolean(config.token);
+  const connected = state.client != null && Boolean(config.token);
+  const brokered = config.transport === 'broker';
   $('setup-title').textContent = connected ? 'Settings' : 'Connect to Homey';
   $('setup-layout').hidden = !connected;
   $('setup-screen').hidden = !connected || !state.screenName;
@@ -210,7 +267,17 @@ function openSetup(errorText) {
   // Served by the Homey app, the address is known; only the API key is asked for.
   $('setup-url-group').hidden = servedByHomey;
   $('setup-url').required = !servedByHomey;
-  $('setup-token').value = config.token ?? '';
+  $('setup-token').value = brokered ? '' : config.token ?? '';
+  $('setup-token').hidden = brokered;
+  $('setup-token').required = !brokered;
+  $('setup-token-label').hidden = brokered;
+  // The existing #setup label rule sets display:block and overrides the user
+  // agent's hidden rule, so hide this label explicitly for broker connections.
+  $('setup-token-label').style.display = brokered ? 'none' : '';
+  $('setup-token').nextElementSibling.hidden = brokered;
+  document.querySelector('#setup-form button[type="submit"]').hidden = brokered;
+  $('setup-forget').hidden = embedded;
+  $('setup-forget').textContent = brokered ? 'Disconnect' : 'Forget';
   $('setup-error').hidden = !errorText;
   $('setup-error').textContent = errorText ?? '';
   if (location.protocol === 'https:' && config.homeyUrl?.startsWith('http:')) {
@@ -244,20 +311,20 @@ $('pairing-use-key').addEventListener('click', () => {
   showSetupMode('key');
 });
 
-$('setup-form').addEventListener('submit', () => {
+$('setup-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const generation = connectionGeneration;
   const token = $('setup-token').value.trim();
-  writeStoredConfig(servedByHomey ? { token } : { homeyUrl: $('setup-url').value.trim(), token });
-  location.reload();
+  const connection = servedByHomey ? { token } : { homeyUrl: $('setup-url').value.trim(), token };
+  await writeStoredConfig(connection);
+  if (generation !== connectionGeneration) return;
+  $('setup').close();
+  await boot({ ...connection, homeyUrl: servedByHomey ? location.origin : connection.homeyUrl });
 });
 
-$('setup-forget').addEventListener('click', () => {
-  try {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(`${STORAGE_KEY}:dashboard`);
-  } catch {
-    // Ignore unavailable storage.
-  }
-  location.reload();
+$('setup-forget').addEventListener('click', async () => {
+  if (!await clearConnection()) return;
+  openSetup();
 });
 
 $('settings-button').addEventListener('click', () => openSetup());
@@ -296,20 +363,74 @@ document.addEventListener('show-dashboard', (event) => showDashboard(event.detai
 
 darkQuery.addEventListener('change', () => renderDashboard());
 
-// A paired browser holds the app's key; once that key is deleted in my.homey.app, it pairs again.
+// A revoked browser connection must reconnect through Homey rather than falling
+// back to an owner key.
 function isRevokedKey(error) {
-  return servedByHomey && error.status === 401;
+  return (servedByHomey || state.config?.transport === 'broker') && error.status === 401;
 }
 
-function pairAgain() {
-  writeStoredConfig({});
+async function clearConnection() {
+  const generation = ++connectionGeneration;
+  state.realtime?.close?.();
+  state.realtime = null;
+  state.client = null;
   state.config = { ...state.config, token: undefined };
-  setStatus('offline', 'Not connected');
-  openSetup('Homey no longer accepts the key this browser had. Pair it again.');
+  state.dashboardId = null;
+  state.dashboards = {};
+  state.data = {};
+  state.dataErrors = {};
+  state.me = null;
+  state.system = {};
+  state.screenName = null;
+  setEditing(false);
+  $('edit-button').hidden = true;
+  for (const dialog of document.querySelectorAll('dialog[open]')) {
+    if (dialog.id !== 'setup') dialog.close();
+  }
+  populateDashboardMenu();
+  const stored = writeStoredConfig({});
+  await showHighlight();
+  if (generation !== connectionGeneration) return false;
+  await renderDashboard();
+  await stored;
+  return generation === connectionGeneration;
 }
 
-async function boot() {
-  state.config = await loadConfig();
+function showEmbeddedFailure(message) {
+  setStatus('offline', 'Not connected');
+  notifyEmbedded('error', { message });
+  $('setup-title').textContent = 'Connection unavailable';
+  $('setup-error').textContent = message;
+  $('setup-error').hidden = false;
+  $('setup-pairing').hidden = true;
+  $('setup-key').hidden = true;
+  if (!$('setup').open) $('setup').showModal();
+}
+
+async function pairAgain(client = state.client, generation = connectionGeneration) {
+  if (!currentConnection(client, generation)) return;
+  if (!await clearConnection()) return;
+  setStatus('offline', 'Not connected');
+  if (embedded) showEmbeddedFailure('This connection has ended. Use Retry in the Homey dashboard view.');
+  else openSetup('This connection has ended. Approve a new browser code in Homey to reconnect.');
+}
+
+async function boot(connection) {
+  const generation = ++connectionGeneration;
+  state.realtime?.close?.();
+  state.realtime = null;
+  state.client = null;
+  try {
+    const config = connection ?? await loadConfig();
+    if (generation !== connectionGeneration) return;
+    state.config = config;
+  } catch (error) {
+    if (generation !== connectionGeneration) return;
+    if (embedded) showEmbeddedFailure(error.message);
+    else openSetup(error.message);
+    return;
+  }
+  if (state.config.screenId) adoptScreenId(state.config.screenId);
   if (!state.config.homeyUrl || !state.config.token) {
     setStatus('offline', 'Not connected');
     openSetup();
@@ -319,55 +440,73 @@ async function boot() {
   try {
     state.client = createClient(state.config);
   } catch (error) {
-    openSetup(`Invalid Homey address: ${error.message}`);
+    if (embedded) showEmbeddedFailure(error.message);
+    else openSetup(`Invalid Homey address: ${error.message}`);
     return;
   }
+  const client = state.client;
+  const current = () => currentConnection(client, generation);
 
   try {
-    // Homey serves the socket.io client matching its own server version.
-    await loadScript(`${state.client.base}/socket.io/socket.io.js`);
+    // Broker connections use the app's event relay; legacy direct connections
+    // still use Homey's socket client.
+    if (client.transport !== 'broker') await loadScript(`${client.base}/socket.io/socket.io.js`);
+    if (!current()) return;
     const onReconnect = () => {
+      if (!current()) return;
       // Homey may have restarted with an updated app while the connection was down.
       checkForUpdate('reconnected');
       registerScreen();
       fetchHighlight();
-      loadWidgetModes().then(refreshAll).catch((error) => {
-        if (isRevokedKey(error)) pairAgain();
+      loadWidgetModes().then(() => current() && refreshAll(client, generation)).catch((error) => {
+        if (!current()) return;
+        if (isRevokedKey(error)) pairAgain(client, generation);
         else console.error(error);
       });
     };
     // Once pairAgain() dropped the key, the old connection's handshake errors are only noise.
     const onStatus = (name, text) => {
-      if (state.config.token) setStatus(name, text);
+      if (current() && state.config.token) setStatus(name, text);
     };
-    state.realtime = createRealtime(state.client, { onStatus, onReconnect });
-    watchHomey();
+    const realtime = createRealtime(client, { onStatus, onReconnect, onUnauthorized: () => pairAgain(client, generation) });
+    if (!current()) { realtime.close?.(); return; }
+    state.realtime = realtime;
+    watchHomey(client, generation);
     watchUpdates();
     watchScreen();
     watchHighlight();
   } catch (error) {
+    if (!current()) return;
     setStatus('error', 'No live updates');
     console.error(error);
   }
 
   try {
     const [system] = await Promise.all([
-      state.client.api('GET', '/api/manager/system/').catch(() => ({})),
+      client.api('GET', '/api/manager/system/').catch(() => ({})),
       loadKeyScopes(),
       loadWidgetModes(),
     ]);
+    if (!current()) return;
     state.system = system;
-    await refreshAll();
+    if (!await refreshAll(client, generation) || !current()) return;
     settleKioskHome();
     $('edit-button').hidden = false;
+    notifyEmbedded('connected');
   } catch (error) {
-    if (isRevokedKey(error)) return pairAgain();
+    if (!current()) return;
+    if (isRevokedKey(error)) return pairAgain(client, generation);
     setStatus('error', 'Not connected');
-    openSetup(`Could not reach Homey: ${error.message}`);
+    if (embedded) showEmbeddedFailure(`Could not reach Homey: ${error.message}`);
+    else openSetup(`Could not reach Homey: ${error.message}`);
   }
 }
 
 initKiosk({ onHold: openUnlock, onIdle: kioskIdle });
 initFit();
 initEditMode();
+// A page restored from the browser's back/forward cache has already closed its
+// event relay on pagehide. Reconnect through normal startup rather than showing
+// a frozen dashboard.
+window.addEventListener('pageshow', (event) => { if (event.persisted) location.reload(); });
 boot();

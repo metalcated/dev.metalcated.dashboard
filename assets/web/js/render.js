@@ -101,6 +101,7 @@ function drawWidget(dashboardId, widget, parent, before) {
 }
 
 export async function renderDashboard() {
+  const client = state.client;
   if (held) {
     heldRender = true;
     return;
@@ -125,7 +126,7 @@ export async function renderDashboard() {
   const widgets = [...columns.flatMap((column) => column.widgets), ...(state.highlighted ? [state.highlighted] : [])];
   const needed = widgets.flatMap((widget) => WIDGETS[widget.type]?.needs ?? []);
   const { data, errors } = await loadData(needed);
-  if (renderId !== renderCount) return; // Superseded by a newer render.
+  if (renderId !== renderCount || state.client !== client) return; // Superseded by a render or connection.
   state.data = data;
   state.dataErrors = errors;
 

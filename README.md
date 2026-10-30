@@ -1,17 +1,24 @@
 # Web Dashboard for Homey
 
-A Homey app that shows the dashboards you build in the Homey mobile app in any browser on your home network, live. Editing stays in the mobile app.
+A Homey app that shows your native Homey dashboards inside Homey's app view or in a browser on your home network. Supported widget edits save back to the same Homey dashboards used by iOS and Android.
+
+This fork adds an integrated dashboard workspace and automatic app authentication. Homey's SDK does not provide a documented way for apps to add a main navigation sidebar item. Open **Apps → Web Dashboard → Configure** for the supported in-Homey workspace; its **Dashboards** tab opens directly on your dashboards. A desktop sidebar lists your existing dashboards, and the title picker remains available on smaller screens and in the mobile view.
+
+The app now requests `homey:manager:api` access. Homey must grant that permission during installation/update before automatic connection works. The app keeps its automatic owner credential on the backend and brokers only supported dashboard operations. No manual API-key creation or browser approval is needed inside Homey.
 
 The dashboard is static files in `assets/web/`, which Homey serves at `/app/dev.schweiger.dashboard/assets/web/index.html`.
-`app.js` works out that address for the settings page, keeps the API key the dashboard uses, and hands it to browsers you approve.
+`app.js` works out that address for the settings page. `lib/dashboard-access.js` provides automatic connection, constrained API access and live updates. Existing manual API keys and previously approved browsers continue to work as an advanced compatibility path.
 
 ## Using it
 
-1. Install the app and open its settings in the Homey app.
-2. Save an API key from my.homey.app → Settings → API Keys. The settings page lists the permissions it needs; the app checks the key against your Homey before saving it.
-3. Open the address shown there on a tablet (or tap **Open dashboard**). The browser shows a six-digit code and the settings page lists it under *Browsers waiting to be paired*. Approve it if the codes match; the browser then gets the key and stores it.
+1. Install/update the app, grant its Homey access permission, and open **Apps → Web Dashboard → Configure**. The **Dashboards** tab connects automatically using the signed-in Homey app session.
+2. For a separate browser or wall display, choose **Open separately** or copy its address from **Connection & screens**. Approve its matching six-digit code there once. No API key needs to be copied.
 
-**Use an API key** on the pairing screen skips pairing and takes a key typed into that browser.
+The embedded connection stays in memory. A separate approved screen stores an opaque, revocable dashboard connection in IndexedDB; the owner's Homey credential is never sent to that screen. Native screen identities are also stored in IndexedDB, separately for each Homey. Layouts remain stored in Homey, so mobile and web edits use the same dashboard objects.
+
+**Reload** reconnects the embedded view, **Expand** fills the screen when supported, and **Open separately** opens the standalone view. Hidden embedded views pause their update polling and live camera streams. The advanced manual-key form remains under **Connection & screens → Advanced connection settings**.
+
+**Use an API key** on the pairing screen is the optional legacy path for a deliberately supplied personal key. New connections are stored in IndexedDB; existing saved configurations are read and migrated without deleting their original record.
 
 Pick the dashboard by tapping its name at the top (as in the app), with a dashboard shortcut widget, or with `?dashboard=<name or id>` in the address. Each browser remembers its choice.
 
@@ -19,7 +26,7 @@ Pick the dashboard by tapping its name at the top (as in the app), with a dashbo
 
 **Fit to screen width**: by default the columns keep their width and scroll sideways. Turn on *Fit to screen width* in the dashboard's **Settings** and that browser shrinks the whole dashboard until every column fits instead (it never enlarges it). `?fit` does the same for one address without storing it.
 
-**Screens**: every browser showing the dashboard is a screen with a name, so flow cards can aim at one ("Hallway tablet"). You name a browser when you approve it (the field starts as e.g. *Safari on iPad*). The app's settings in the Homey app list all screens to rename or forget them, and the dashboard's **Settings** shows its own name. A browser keeps a random id in its storage, so the name survives reloads and **Forget**; clearing the browser's data makes it a new screen. Browsers paired before screens existed, or set up with a typed key, show up under their browser name. A private window can't keep an id, so it only follows cards aimed at all screens.
+**Screens**: every browser showing the dashboard is a screen with a name, so flow cards can aim at one ("Hallway tablet"). You name a browser when you approve it (the field starts as e.g. *Safari on iPad*). The app's settings in the Homey app list all screens to rename or forget them, and the dashboard's **Settings** shows its own name. Automatic connections retain their approved screen id in IndexedDB, and **Forget** revokes their connection until another approval. Older manual-key connections retain the upstream screen-id behavior. Browsers paired before screens existed, or set up with a typed key, show up under their browser name.
 
 **Flow cards**: put one widget or dashboard in front of everyone, or of one screen, e.g. the front-door camera on the hallway tablet when the doorbell rings. Each card's first choice is the screen: *All screens* or a named one.
 
@@ -66,7 +73,7 @@ Routes in `api.js` (`/api/app/dev.schweiger.dashboard/…`):
 | `GET /widget-modes` | public | how app widgets run, by widget id: `storage` or `trusted` (missing: `sandboxed`); changes are sent as the realtime event `widget-modes` |
 | `PUT /widget-modes/:id` | public | `{ token, mode }`; acts only if the token has `homey.dashboard`; drops widgets no longer on a dashboard |
 
-Waiting browsers are kept in memory for 10 minutes, at most 10 at a time; an app restart drops them and the browsers ask for a new code. Without a saved key, `POST /pairing` refuses. Served by the app, a browser whose key Homey rejects (401) forgets it and pairs again.
+Waiting browsers are kept in memory for 10 minutes, at most 10 at a time; an app restart drops them and the browsers ask for a new code. New pairings require no saved API key. A new approval returns an opaque connection with `transport: "broker"`; legacy responses without that field remain supported. A rejected connection (401) returns a separate screen to pairing, while the embedded view offers reconnection through Homey's signed-in app session.
 
 ## Layout
 
@@ -114,6 +121,18 @@ assets/web/
 - Colour presets, the colour-temperature formula and the zone icon name mapping follow the Homey web app's behaviour; they're data, not artwork.
 
 ## Security
+
+### Automatic connections in this fork
+
+Homey's owner token stays in backend memory. The protected `/workspace/connect` route is called through Homey's signed-in settings bridge. It returns an opaque dashboard session, not the owner token. Public `/workspace/request` and `/workspace/events` routes require that session and reject APIs outside the dashboard allowlist. Session hashes, screen associations and expiration times are stored in Homey's settings database. Native sessions last one day, approved separate screens thirty days, with at most 64 retained sessions. **Forget** revokes broker connections for that screen. Multiple native tabs may share a screen identity without signing each other out.
+
+The broker blocks app administration, arbitrary API endpoints, dashboard deletion and changes to another user's presence. Widget API calls are limited to registered widget instances present on native dashboards. Native dashboard changes retain the existing queued read/modify/write path. A refused owner credential can be refreshed once; timeouts and other ambiguous failures never automatically repeat a control command.
+
+Embedded authentication accepts only the immediate parent frame and its exact referrer origin; the parent sends a restricted connection only to the expected dashboard frame. Credentials are kept out of URLs. Live relay subscriptions and buffered events are bounded; reconnects and app restarts resynchronize from Homey.
+
+### Legacy manual-key connections
+
+The following upstream notes describe existing manual-key connections and app-widget compatibility modes. They do not describe the automatic broker connection above.
 
 Served by the app, the dashboard shares Homey's origin with Homey's own web app and every app's widgets and settings pages. App widgets therefore run in iframes sandboxed without `allow-same-origin`, so they can't read the stored API key. Use a key with only the permissions listed in the settings page.
 

@@ -1,11 +1,23 @@
 'use strict';
 
 // App API at /api/app/dev.schweiger.dashboard/…
-// Only the routes marked "public" in app.json are reachable without signing in: two let a new browser ask for a
-// code and pick up the API key once its code is approved, three let a dashboard say which screen it is and read and
-// close its widget highlight (saying hello and closing check the dashboard's key). Everything else needs a signed-in Homey session with app control, which the
-// settings page in the Homey app has.
+// A new browser can only request a code and collect an approved opaque dashboard connection. Public workspace
+// requests validate that connection and a constrained route allowlist; automatic owner credentials never leave
+// the app. Existing manual-key routes remain supported. Administrative routes, including automatic connect, need
+// the signed-in Homey settings view and are never available through the dashboard broker.
 module.exports = {
+  async connectWorkspace({ homey, body }) {
+    return homey.app.connectWorkspace(body ?? {});
+  },
+
+  async requestWorkspace({ homey, body }) {
+    return homey.app.requestWorkspace(body ?? {});
+  },
+
+  async workspaceEvents({ homey, body }) {
+    return homey.app.workspaceEvents(body ?? {});
+  },
+
   async requestPairing({ homey, body }) {
     return homey.app.requestPairing(body ?? {});
   },

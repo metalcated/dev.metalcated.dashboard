@@ -8,6 +8,7 @@
 
 import { findDevice } from '../devices.js';
 import { el, note } from '../dom.js';
+import { isDashboardVisible, subscribeDashboardVisibility } from '../embedded.js';
 import { COLLAPSE_ICON, EXPAND_ICON } from '../icons.js';
 import { state } from '../state.js';
 
@@ -40,6 +41,7 @@ function liveStream(videoId) {
   let pc = null;
   let keepAlive = null;
   let retry = null;
+  let stopWatchingVisibility = null;
   const api = (path, payload) => state.client.api('POST', `/api/manager/videos/video/${videoId}${path}`, payload);
   const emit = () => listeners.forEach((listener) => listener(shared));
   const showStatus = (text) => {
@@ -58,11 +60,15 @@ function liveStream(videoId) {
   function retryLater(message) {
     stop();
     showStatus(message);
-    if (listeners.size > 0 && document.visibilityState === 'visible') retry = setTimeout(start, RETRY);
+    if (listeners.size > 0 && isDashboardVisible()) retry = setTimeout(start, RETRY);
   }
 
   async function start() {
     stop();
+    if (!isDashboardVisible()) {
+      showStatus('Paused');
+      return;
+    }
     showStatus('Connecting…');
     const connection = new RTCPeerConnection();
     pc = connection;
@@ -98,14 +104,17 @@ function liveStream(videoId) {
   }
 
   const onVisibility = () => {
-    if (document.visibilityState === 'visible') start();
-    else stop();
+    if (isDashboardVisible()) start();
+    else {
+      stop();
+      showStatus('Paused');
+    }
   };
 
   shared.subscribe = (listener) => {
     listeners.add(listener);
     if (listeners.size === 1) {
-      document.addEventListener('visibilitychange', onVisibility);
+      stopWatchingVisibility = subscribeDashboardVisibility(onVisibility);
       start();
     } else {
       listener(shared);
@@ -113,7 +122,7 @@ function liveStream(videoId) {
     return () => {
       listeners.delete(listener);
       if (listeners.size > 0) return;
-      document.removeEventListener('visibilitychange', onVisibility);
+      stopWatchingVisibility?.();
       stop();
       streams.delete(videoId);
     };

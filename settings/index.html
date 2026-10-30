@@ -1,8 +1,12 @@
 <!doctype html>
 <html>
   <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <!-- The '/homey.js' script must be included in your settings view to work -->
     <script type="text/javascript" src="/homey.js" data-origin="settings"></script>
+    <link rel="stylesheet" href="workspace.css" />
+    <script src="workspace.js"></script>
     <style>
       /* Homey's button styles set display, which would otherwise show hidden buttons. */
       [hidden] { display: none !important; }
@@ -33,13 +37,35 @@
   <body>
     <header class="homey-header">
       <h1 class="homey-title">Web Dashboard</h1>
-      <p class="homey-subtitle">Your Homey dashboards in any browser on your home network.</p>
+      <p class="homey-subtitle">The same dashboards on your computer, phone and tablet.</p>
     </header>
+
+    <nav class="workspace-tabs" role="tablist" aria-label="Dashboard workspace">
+      <button id="dashboard-tab" type="button" role="tab" aria-controls="dashboard-panel" aria-selected="true">Dashboards</button>
+      <button id="connection-tab" type="button" role="tab" aria-controls="connection-panel" aria-selected="false" tabindex="-1">Connection &amp; screens</button>
+    </nav>
+
+    <section id="dashboard-panel" class="workspace-panel" role="tabpanel" aria-labelledby="dashboard-tab">
+      <div class="workspace-toolbar">
+        <p class="homey-text-small">Shared with the Homey mobile app</p>
+        <div class="workspace-actions">
+          <button id="workspace-reload" type="button" class="homey-button-secondary-small" disabled>Reload</button>
+          <button id="workspace-expand" type="button" class="homey-button-secondary-small" disabled>Expand</button>
+          <button id="workspace-open" type="button" class="homey-button-secondary-small" disabled>Open separately</button>
+        </div>
+      </div>
+      <p id="workspace-status" class="homey-text-small" role="status">Opening your dashboards…</p>
+      <iframe id="workspace-frame" class="workspace-frame" title="Homey dashboards" allow="autoplay; fullscreen" referrerpolicy="origin" hidden></iframe>
+      <p class="homey-text-small workspace-help">Changes are saved to Homey and appear in the mobile app. To connect a separate screen, open Connection &amp; screens and approve its code.</p>
+    </section>
+
+    <section id="connection-panel" class="workspace-panel" role="tabpanel" aria-labelledby="connection-tab" hidden>
+    <p class="homey-text-small">Dashboards connect automatically inside Homey. A separate browser or wall display only needs your approval here.</p>
 
     <fieldset class="homey-form-fieldset">
       <legend class="homey-form-legend">Address</legend>
       <p id="dashboard-url" class="address">…</p>
-      <button id="open" class="homey-button-primary-full">Open dashboard</button>
+      <button id="open" class="homey-button-primary-full">Open in this view</button>
       <button id="copy" class="homey-button-secondary-full">Copy link</button>
       <p id="copy-message" class="homey-text-small message-error" role="status" hidden></p>
       <p class="homey-text-small">
@@ -51,8 +77,7 @@
       <legend class="homey-form-legend">Waiting for approval</legend>
       <div id="pairings"></div>
       <p class="homey-text-small">
-        A browser opening the dashboard for the first time shows a code; approve it here if the code matches and that
-        browser gets the API key below. A kiosk tablet shows a code too when someone wants to change its settings.
+        A separate browser opening the dashboard shows a code. Approve the matching code to connect it. A kiosk tablet also asks here when someone wants to change its settings.
       </p>
     </fieldset>
 
@@ -61,11 +86,12 @@
       <div id="screens"></div>
       <p class="homey-text-small">
         The browsers showing the dashboard. Flow cards can highlight a widget or show a dashboard on one of them by this
-        name. A browser keeps its name across reloads; a forgotten one that is still in use comes back under its browser
-        name the next time it loads.
+        name. A browser keeps its name across reloads. For new connections, Forget disconnects the screen until you approve it again.
       </p>
     </fieldset>
 
+    <details class="workspace-advanced">
+      <summary>Advanced connection settings</summary>
     <fieldset class="homey-form-fieldset">
       <legend class="homey-form-legend">API key</legend>
       <p id="key-status">…</p>
@@ -97,9 +123,12 @@
         </p>
       </div>
     </fieldset>
+    </details>
+    </section>
 
     <script type="text/javascript">
       function onHomeyReady(Homey) {
+        var workspace = createDashboardWorkspace(Homey);
         var openButton = document.getElementById('open');
         var copyButton = document.getElementById('copy');
         var pairingsNode = document.getElementById('pairings');
@@ -111,20 +140,22 @@
         var changeButton = document.getElementById('change-key');
         var keyCheck = document.getElementById('key-check');
         var dashboardUrl = null;
+        var automaticConnection = false;
 
         Homey.get('dashboardUrl', function (err, value) {
-          if (err) return Homey.alert(err);
-          dashboardUrl = value;
+          if (err) return workspace.showError(err.message || String(err));
+          workspace.setAddress(value);
+          dashboardUrl = workspace.address();
           document.getElementById('dashboard-url').textContent = value || 'Restart the app to show the address.';
-          openButton.disabled = !value;
-          copyButton.disabled = !value;
+          openButton.disabled = !dashboardUrl;
+          copyButton.disabled = !dashboardUrl;
         });
         Homey.get('dashboardLocalUrl', function (err, value) {
           if (err) return Homey.alert(err);
           document.getElementById('dashboard-local-url').textContent = value || '…';
         });
         openButton.addEventListener('click', function () {
-          if (dashboardUrl) Homey.openURL(dashboardUrl);
+          workspace.openDashboard();
         });
 
         // This page runs in a frame of the Homey app, where the async clipboard API is often blocked; the old
@@ -438,23 +469,27 @@
 
         function renderKeyStatus(status, justSaved) {
           var isSet = Boolean(status && status.set);
+          automaticConnection = Boolean(status && status.automatic);
           keyStatus.textContent = !isSet
-            ? 'No key saved yet. Browsers can only be paired once one is.'
+            ? automaticConnection
+              ? 'Connected automatically through Homey. A manual API key is optional.'
+              : 'Automatic connection is not available. Update the app and accept its Homey access permission, or use a manual key.'
             : justSaved
               ? 'Saved. The key belongs to ' + status.user + '; browsers can be paired now.'
               : 'Set, belongs to ' + status.user + '.';
           keyStatus.className = justSaved ? 'message-ok' : '';
           renderKeyCheck(status);
-          keyForm.hidden = isSet;
-          changeButton.hidden = !isSet;
-          changeButton.textContent = 'Change key';
+          keyForm.hidden = isSet || automaticConnection;
+          changeButton.hidden = !isSet && !automaticConnection;
+          changeButton.textContent = isSet ? 'Change key' : 'Use a manual key';
           keyMessage.hidden = true;
         }
 
         changeButton.addEventListener('click', function () {
           var opening = keyForm.hidden;
           keyForm.hidden = !opening;
-          changeButton.textContent = opening ? 'Keep the current key' : 'Change key';
+          changeButton.textContent = opening ? automaticConnection ? 'Keep automatic connection' : 'Keep the current key'
+            : automaticConnection ? 'Use a manual key' : 'Change key';
           keyMessage.hidden = true;
           keyInput.value = '';
           if (opening) keyInput.focus();

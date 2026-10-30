@@ -13,6 +13,55 @@ body {
 }
 button, input, select { font: inherit; color: inherit; }
 
+/* ----- Desktop dashboard navigation ----- */
+/* Keep the title picker on phones and tablets. The fixed rail leaves the board's existing vertical flex layout and
+   bottom scrollbar intact; fitting measures the space that remains beside it. */
+.dashboard-sidebar { display: none; }
+@media (min-width: 1040px) {
+  .has-dashboard-navigation { padding-left: 232px; }
+  .dashboard-sidebar:not([hidden]) {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    width: 232px;
+    padding: calc(24px + env(safe-area-inset-top)) 12px 20px;
+    border-right: 1px solid var(--tile-border);
+    background: var(--bg-top);
+  }
+  .dashboard-sidebar-title {
+    margin: 0 12px 20px;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  #dashboard-navigation { min-height: 0; overflow-y: auto; }
+  .dashboard-navigation-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    margin: 2px 0;
+    padding: 12px;
+    border: 0;
+    border-radius: 12px;
+    background: none;
+    color: var(--text-primary);
+    font-size: 15px;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+  }
+  .dashboard-navigation-item svg { flex: none; width: 20px; height: 20px; }
+  .dashboard-navigation-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dashboard-navigation-item[aria-current="page"] { background: var(--control); color: var(--shortcut); }
+  .dashboard-navigation-item:focus-visible { outline: 2px solid var(--shortcut); outline-offset: -2px; }
+  .dashboard-navigation-item:not([aria-current]):hover { background: var(--tile); }
+  .kiosk .has-dashboard-navigation { padding-left: 0; }
+  .kiosk .dashboard-sidebar:not([hidden]) { display: none; }
+}
+
 /* ----- Header ----- */
 .bar {
   position: sticky;
@@ -102,6 +151,14 @@ html.kiosk, .kiosk body { overscroll-behavior: none; }
 @media (max-width: 760px) {
   .board { scroll-snap-type: x mandatory; gap: 16px; }
   .bar h1 { font-size: 28px; }
+}
+/* A narrow embedded Homey view needs a full title row; status and controls must not reduce it to one letter. */
+@media (max-width: 520px) {
+  .bar { flex-wrap: wrap; gap: 8px; }
+  .bar h1 { flex-basis: 100%; }
+  .bar .spacer { display: none; }
+  .bar .controls { width: 100%; }
+  .bar .status { margin-right: auto; }
 }
 /* Fit to width (js/fit.js): columns keep their full width and the board is zoomed out to fit instead. */
 .fit .board { --column-width: 440px; }

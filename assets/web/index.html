@@ -19,6 +19,10 @@
 <link rel="stylesheet" href="css/sheets.css">
 </head>
 <body>
+<aside id="dashboard-sidebar" class="dashboard-sidebar" hidden>
+  <h2 class="dashboard-sidebar-title">Dashboards</h2>
+  <nav id="dashboard-navigation" aria-label="Dashboards"></nav>
+</aside>
 <header class="bar">
   <h1><button id="dashboard-switch" class="title-switch" type="button" aria-haspopup="true" aria-expanded="false"
     aria-controls="dashboard-menu"><span id="dashboard-name">Homey</span><span class="title-caret" aria-hidden="true"></span></button></h1>
@@ -61,7 +65,7 @@
         <input id="setup-url" name="homeyUrl" type="url" required placeholder="https://192-168-1-2.homey.homeylocal.com">
         <p>Use the HTTPS <code>*.homey.homeylocal.com</code> address so the browser allows the connection.</p>
       </div>
-      <label for="setup-token">API key</label>
+      <label id="setup-token-label" for="setup-token">API key</label>
       <input id="setup-token" name="token" type="password" required autocomplete="off">
       <p>Create one in my.homey.app under Settings → API Keys. It is stored only in this browser.</p>
       <div id="setup-screen" hidden>

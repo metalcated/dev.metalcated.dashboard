@@ -28,14 +28,17 @@ export function widgetMode(widgetId) {
 
 export async function loadWidgetModes() {
   if (!servedByHomey) return;
-  modes = (await state.client.api('GET', `/api/app/${APP_ID}/widget-modes`).catch(() => null)) ?? modes;
+  const client = state.client;
+  const loaded = await client.api('GET', `/api/app/${APP_ID}/widget-modes`).catch(() => null);
+  if (state.client === client) modes = loaded ?? modes;
 }
 
 // handler gets the ids of the widgets whose mode changed.
 export function watchWidgetModes(handler) {
   if (!servedByHomey) return;
+  const client = state.client;
   onChange = handler;
-  subscribe(`homey:app:${APP_ID}`, 'widget-modes', apply);
+  subscribe(`homey:app:${APP_ID}`, 'widget-modes', (next) => { if (state.client === client) apply(next); });
 }
 
 // Needs a key that may change dashboards (homey.dashboard), like the widget's other settings.

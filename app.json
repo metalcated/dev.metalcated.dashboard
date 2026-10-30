@@ -1,7 +1,7 @@
 {
   "_comment": "This file is generated. Please edit .homeycompose/app.json instead.",
   "id": "dev.schweiger.dashboard",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "compatibility": ">=13.0.0",
   "sdk": 3,
   "platforms": [
@@ -26,7 +26,9 @@
       "web"
     ]
   },
-  "permissions": [],
+  "permissions": [
+    "homey:manager:api"
+  ],
   "images": {
     "small": "/assets/images/small.jpg",
     "large": "/assets/images/large.jpg",
@@ -107,6 +109,20 @@
     "setWidgetMode": {
       "method": "PUT",
       "path": "/widget-modes/:id",
+      "public": true
+    },
+    "connectWorkspace": {
+      "method": "POST",
+      "path": "/workspace/connect"
+    },
+    "requestWorkspace": {
+      "method": "POST",
+      "path": "/workspace/request",
+      "public": true
+    },
+    "workspaceEvents": {
+      "method": "POST",
+      "path": "/workspace/events",
       "public": true
     }
   },

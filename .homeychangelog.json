@@ -17,6 +17,9 @@
   "1.3.1": {
     "en": "Fixed: on a Homey Self-Hosted Server, Open dashboard and Copy link now use its own https port, and device tiles have the same gap as the other widgets."
   },
+  "1.4.1": {
+    "en": "Dashboard workspace inside Homey with desktop dashboard navigation. Automatic Homey connection replaces manual key setup for new screens; separate displays connect with one approval. Shared native dashboard edits remain available in the mobile apps."
+  },
   "1.4.0": {
     "en": "New: edit mode now also changes built-in widgets: the devices, lights, speaker, thermostat, Flows, moods, variables or dashboards a widget shows, a note's colour, a line chart's Insight, time span and dark mode, and the categories a Timeline shows. Fixed: a Timeline leaves out the categories switched off in the Homey app, a chart set to dark mode stays dark, and a light widget shows its own name."
   }

@@ -97,6 +97,7 @@ function fit() {
 
 // Shows what the app says is highlighted, once the dashboards it is on have loaded. Called again whenever they change.
 export async function showHighlight() {
+  const client = state.client;
   const highlight = current;
   const widget = highlight && findWidget(highlight);
   if (widget == null) {
@@ -113,7 +114,7 @@ export async function showHighlight() {
   const missing = live ? [] : (definition?.needs ?? []).filter((need) => state.data[need] == null);
   if (missing.length > 0) {
     const { data, errors } = await loadData(missing);
-    if (run !== generation) return; // Replaced or closed meanwhile.
+    if (run !== generation || state.client !== client) return; // Replaced, closed or reconnected meanwhile.
     Object.assign(state.data, data);
     Object.assign(state.dataErrors, errors);
     live = drawnWidget(highlight.dashboardId, widget);
@@ -155,10 +156,11 @@ function setCurrent(highlight) {
 // On load and after reconnecting: the app may have changed it while this page wasn't listening.
 export async function fetchHighlight() {
   if (!servedByHomey) return;
+  const client = state.client;
   try {
     const query = screenId() ? `?screen=${encodeURIComponent(screenId())}` : '';
-    const { highlight } = await state.client.api('GET', `/api/app/${APP_ID}/highlight${query}`);
-    setCurrent(highlight);
+    const { highlight } = await client.api('GET', `/api/app/${APP_ID}/highlight${query}`);
+    if (state.client === client) setCurrent(highlight);
   } catch (error) {
     console.info(`Highlight: ${error.message}`);
   }
@@ -177,6 +179,7 @@ function closeEverywhere() {
 // Needs the client and the realtime connection.
 export function watchHighlight() {
   if (!servedByHomey) return;
+  const client = state.client;
   closeButton.innerHTML = CLOSE_ICON;
   closeButton.addEventListener('click', closeEverywhere);
   // Unless a sheet opened from the widget is on top: Escape closes that.
@@ -189,6 +192,8 @@ export function watchHighlight() {
   addEventListener('resize', fit);
 
   // Every screen's highlight; a browser without a screen id shows the one for all screens.
-  subscribe(`homey:app:${APP_ID}`, 'highlight', (data) => setCurrent(data?.highlights?.[screenId() ?? 'all']));
+  subscribe(`homey:app:${APP_ID}`, 'highlight', (data) => {
+    if (state.client === client) setCurrent(data?.highlights?.[screenId() ?? 'all']);
+  });
   fetchHighlight();
 }

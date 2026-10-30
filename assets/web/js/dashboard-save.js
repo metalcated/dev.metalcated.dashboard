@@ -9,7 +9,10 @@ let scopes = null; // What the key may do, once known.
 const grants = (scope) => scope.split('.').some((_, index, parts) => scopes.includes(parts.slice(0, index + 1).join('.')));
 
 export async function loadKeyScopes() {
-  const session = await state.client.api('GET', '/api/manager/sessions/session/me').catch(() => null);
+  const client = state.client;
+  scopes = null;
+  const session = await client.api('GET', '/api/manager/sessions/session/me').catch(() => null);
+  if (state.client !== client) return;
   scopes = session?.intersectedScopes ?? session?.scopes ?? null;
 }
 
@@ -35,6 +38,12 @@ export const isSaving = (dashboardId) => (pending.get(dashboardId) ?? 0) > 0;
 // 'dashboard-saved', so the page shows it before Homey's own update arrives. Optimistic: the page shows the change
 // before it is saved (a move), and what Homey has if saving fails.
 export function updateDashboard(dashboardId, mutate, { optimistic = false } = {}) {
+  const client = state.client;
+  const current = () => client != null && state.client === client;
+  const requireCurrent = () => {
+    if (!current()) throw new Error('This connection changed. Reopen the dashboard before editing.');
+  };
+  requireCurrent();
   const path = `/api/manager/dashboards/dashboard/${encodeURIComponent(dashboardId)}`;
   if (optimistic && state.dashboards[dashboardId] != null) {
     const local = structuredClone(state.dashboards[dashboardId]);
@@ -44,22 +53,26 @@ export function updateDashboard(dashboardId, mutate, { optimistic = false } = {}
   pending.set(dashboardId, (pending.get(dashboardId) ?? 0) + 1);
   const save = queue.then(async () => {
     try {
-      const dashboard = await state.client.api('GET', path);
+      requireCurrent();
+      const dashboard = await client.api('GET', path);
+      requireCurrent();
       const columns = structuredClone(dashboard.columns ?? []);
       mutate(columns);
-      return await state.client.api('PUT', path, { columns });
+      const saved = await client.api('PUT', path, { columns });
+      requireCurrent();
+      return saved;
     } finally {
       pending.set(dashboardId, pending.get(dashboardId) - 1);
     }
   });
   queue = save.catch(() => {});
   return save.then((saved) => {
-    if (!isSaving(dashboardId)) announce(saved);
+    if (current() && !isSaving(dashboardId)) announce(saved);
     return saved;
   }, async (error) => {
-    if (optimistic && !isSaving(dashboardId)) {
-      const current = await state.client.api('GET', path).catch(() => null);
-      if (current) announce(current);
+    if (current() && optimistic && !isSaving(dashboardId)) {
+      const dashboard = await client.api('GET', path).catch(() => null);
+      if (current() && dashboard) announce(dashboard);
     }
     if (error.status === 403) throw new Error(NO_EDIT_PERMISSION);
     if (error.status === 404) throw new Error('This dashboard was deleted meanwhile.');

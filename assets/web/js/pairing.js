@@ -1,5 +1,5 @@
 // Pairing: a browser without an API key asks the Web Dashboard app for a code, you approve that code in the
-// app's settings in the Homey app, and the app hands this browser its API key. A kiosk tablet uses the same flow with
+// app's settings in the Homey app, and the app gives this browser a scoped connection. A kiosk tablet uses the same flow with
 // purpose 'unlock' to open its settings; that approval hands out nothing. Only used when served by the app.
 
 import { $ } from './dom.js';
@@ -30,7 +30,7 @@ function showStatus(text, { isError = false, retry = null } = {}) {
 }
 
 // Asks for a code and waits for it to be approved. Calling start() again starts over with a new code (for the same
-// purpose when none is given); stop() ends it. onApproved(token, purpose); unlocking gets no token.
+// purpose when none is given); stop() ends it. onApproved(token, purpose, result); unlocking gets no token.
 export function createPairing({ onApproved }) {
   let attempt = 0;
   let timer = null;
@@ -52,7 +52,7 @@ export function createPairing({ onApproved }) {
       }
       if (current !== attempt) return;
       if (result.status === 'approved') {
-        onApproved(result.token, purpose);
+        onApproved(result.token, purpose, result);
       } else if (result.status === 'waiting') {
         poll(id, expiresAt, current);
       } else if (result.status === 'declined') {

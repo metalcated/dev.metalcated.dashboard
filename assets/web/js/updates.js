@@ -45,9 +45,10 @@ function compare(version, reason) {
 
 export async function checkForUpdate(reason) {
   if (!servedByHomey || reloading) return;
+  const client = state.client;
   try {
-    const app = await state.client.api('GET', `/api/manager/apps/app/${APP_ID}`);
-    compare(app?.version, reason);
+    const app = await client.api('GET', `/api/manager/apps/app/${APP_ID}`);
+    if (state.client === client) compare(app?.version, reason);
   } catch (error) {
     console.info(`Update check (${reason}) failed: ${error.message}`);
   }
@@ -56,6 +57,7 @@ export async function checkForUpdate(reason) {
 // Needs the client and the realtime connection.
 export function watchUpdates() {
   if (!servedByHomey) return;
+  const client = state.client;
   try {
     const previous = sessionStorage.getItem(RELOADED_KEY);
     if (previous != null) {
@@ -73,9 +75,11 @@ export function watchUpdates() {
   // Homey reports an install, update or restart as app.update events ending with state 'running'. An install also
   // deletes and creates the app, which tells it apart from a restart.
   subscribe('homey:manager:apps', 'app.create', (app) => {
+    if (state.client !== client) return;
     if (app?.id === APP_ID) installed = true;
   });
   subscribe('homey:manager:apps', 'app.update', (app) => {
+    if (state.client !== client) return;
     if (app?.id !== APP_ID || app.state !== 'running' || reloading) return;
     if (installed && app.origin?.startsWith('devkit')) reload('app started', `developer install (${app.origin})`);
     else compare(app.version, 'app started');

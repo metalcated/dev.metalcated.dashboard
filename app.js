@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const Homey = require('homey');
+const { DashboardAccess } = require('./lib/dashboard-access');
 
 // What the dashboard needs, named as in my.homey.app's API key form (group → box); that form lacks the first and the
 // energy one, so those are named by scope.
@@ -117,23 +118,35 @@ function ago(timestamp) {
 }
 
 // The dashboard is static files in assets/web/, which Homey serves at /app/<app id>/assets/web/.
-// The app works out that address for the settings page, keeps the API key the dashboard uses, and hands
-// it to browsers you approve (pairing), so the key only has to be entered once.
+// The app works out that address for the settings page. New screens use opaque, revocable dashboard sessions;
+// the SDK's automatic owner credential stays on the backend. Existing manually configured keys remain supported.
 module.exports = class DashboardApp extends Homey.App {
   async onInit() {
     // Waiting browsers live in memory only; a restart simply asks them for a new code.
     this.pairings = new Map();
+    this.getDashboardAccess();
 
     // e.g. "192.168.3.210:80"; a Homey Self-Hosted Server has its own http port, by default 4859.
     const address = await this.homey.cloud.getLocalAddress();
     const [ip, httpPort = '80'] = address.split(':');
     const path = `/app/${this.manifest.id}/assets/web/index.html`;
     this.homey.settings.set('dashboardLocalUrl', `http://${address}${path}`);
-    this.setSecureUrl(ip, Number(httpPort), path).catch(this.error);
+    await this.setSecureUrl(ip, Number(httpPort), path).catch(this.error);
 
     this.initHighlightCards();
     this.initShowDashboardCard();
   }
+
+  getDashboardAccess() {
+    this.dashboardAccess ??= new DashboardAccess({ homey: this.homey, app: this, appId: this.manifest.id });
+    return this.dashboardAccess;
+  }
+
+  async connectWorkspace(body) { return this.getDashboardAccess().connect(body); }
+  async requestWorkspace(body) { return this.getDashboardAccess().request(body); }
+  async workspaceEvents(body) { return this.getDashboardAccess().events(body); }
+
+  async onUninit() { await this.dashboardAccess?.close(); }
 
   // *.homey.homeylocal.com resolves to the Homey on the local network and has a valid HTTPS certificate. A Homey Pro
   // serves it on 443; a Homey Self-Hosted Server on a port of its own, by default the one after its http port (4860),
@@ -162,13 +175,10 @@ module.exports = class DashboardApp extends Homey.App {
 
   // ----- Pairing (public routes: an unknown browser can only ask for a code and poll it) -----
 
-  // purpose 'pair' hands an approved browser the API key. 'unlock' only lets a kiosk tablet, which already has the
-  // key, open its settings: approving it hands out nothing.
+  // purpose 'pair' hands an approved browser a limited dashboard connection. 'unlock' only lets a kiosk tablet open
+  // its settings: approving it hands out nothing. An unknown browser cannot obtain an owner token by asking.
   requestPairing({ name, purpose, screenId }) {
     const unlock = purpose === 'unlock';
-    if (!unlock && !this.homey.settings.get('apiKey')) {
-      throw new Error('No API key is set yet. Add one in the Web Dashboard settings in the Homey app.');
-    }
     this.prunePairings();
 
     const pairing = {
@@ -192,7 +202,7 @@ module.exports = class DashboardApp extends Homey.App {
     return { id: pairing.id, code: pairing.code, expiresAt: pairing.createdAt + PAIRING_TTL };
   }
 
-  // The browser polls with its secret id. The key is handed over once, after approval, then the pairing is gone.
+  // The browser polls with its secret id. Its opaque connection is handed over once, after approval.
   getPairing(id) {
     this.prunePairings();
     const pairing = this.pairings.get(id);
@@ -202,9 +212,8 @@ module.exports = class DashboardApp extends Homey.App {
     this.pairings.delete(id);
     if (pairing.status === 'declined') return { status: 'declined' };
     if (pairing.purpose === 'unlock') return { status: 'approved' };
-    const token = this.homey.settings.get('apiKey');
-    if (!token) return { status: 'declined' };
-    return { status: 'approved', token };
+    if (!pairing.connection) return { status: 'declined' };
+    return { status: 'approved', ...pairing.connection };
   }
 
   // ----- Pairing (settings page) -----
@@ -223,7 +232,11 @@ module.exports = class DashboardApp extends Homey.App {
   // name: what to call the browser from now on (only when it connects, not for an unlock).
   approvePairing(id, { name } = {}) {
     const pairing = this.pairings.get(id);
-    if (pairing?.status === 'waiting' && pairing.purpose === 'pair' && pairing.screenId != null) {
+    this.prunePairings();
+    if (!this.pairings.has(id) || pairing?.status !== 'waiting') throw new Error('This browser is no longer waiting.');
+    if (pairing.purpose === 'pair') {
+      pairing.connection = this.getDashboardAccess().issue({ screenId: pairing.screenId, kind: 'paired' });
+      pairing.screenId = pairing.connection.screenId;
       this.saveScreen(pairing.screenId, { name: cleanName(name) ?? this.screens()[pairing.screenId]?.name ?? pairing.name });
     }
     return this.decide(id, 'approved');
@@ -260,7 +273,7 @@ module.exports = class DashboardApp extends Homey.App {
   // Also asks Homey what the saved key may do, so the settings page can name missing and too broad permissions.
   async getApiKeyStatus() {
     const status = this.homey.settings.get('apiKeyStatus') ?? { set: false };
-    if (!status.set) return status;
+    if (!status.set) return { ...status, automatic: true };
     const scopes = await this.keyScopes(this.homey.settings.get('apiKey')).catch(() => null);
     if (scopes == null) return status;
     return {
@@ -281,7 +294,7 @@ module.exports = class DashboardApp extends Homey.App {
   }
 
   async getFromHomey(path) {
-    if (!this.homey.settings.get('apiKey')) throw new Error('No API key is set yet. Add one in the Web Dashboard settings in the Homey app.');
+    if (!this.homey.settings.get('apiKey')) return this.getDashboardAccess().ownerRequest('GET', path);
     const response = await this.callHomey(path);
     if (!response.ok) throw new Error(`Homey refused ${path}: ${response.status}`);
     return response.json();
@@ -321,6 +334,10 @@ module.exports = class DashboardApp extends Homey.App {
   // Whether this Homey accepts a key a dashboard sent, and has the scope, if one is named. The public routes act only
   // for one it does.
   async checkKey(token, scope) {
+    if (this.getDashboardAccess().isBrokerToken(token)) {
+      this.getDashboardAccess().authorize(token);
+      return;
+    }
     const scopes = typeof token === 'string' && token !== '' ? await this.keyScopes(token).catch(() => null) : null;
     if (scopes == null) throw new Error('Homey doesn\'t accept this key.');
     if (scope != null && !grants(scopes, scope)) throw new Error(`This key may not do that (it needs ${scope}).`);
@@ -376,6 +393,9 @@ module.exports = class DashboardApp extends Homey.App {
   // screens existed, or set up with a typed key) is added under its browser name.
   async screenHello({ token, id, name }) {
     await this.checkKey(token);
+    if (this.getDashboardAccess().isBrokerToken(token) && this.getDashboardAccess().authorize(token).screenId !== id) {
+      throw new Error('A screen can only register its own connection.');
+    }
     if (!validScreenId(id)) throw new Error('Invalid screen id.');
     let screen = this.screens()[id];
     if (screen == null) screen = this.saveScreen(id, { name: cleanName(name) ?? 'Browser' });
@@ -405,10 +425,11 @@ module.exports = class DashboardApp extends Homey.App {
   }
 
   // The browser itself keeps its id; if it is still in use, it comes back under its browser name.
-  forgetScreen(id) {
+  async forgetScreen(id) {
     const screens = this.screens();
     delete screens[id];
     this.homey.settings.set('screens', screens);
+    await this.getDashboardAccess().revokeScreen(id);
     this.announceScreens();
     if (this.highlights.delete(id)) this.announceHighlights();
     return this.listScreens();
@@ -589,6 +610,10 @@ module.exports = class DashboardApp extends Homey.App {
   // screen showed, not on one that replaced it meanwhile.
   async closeHighlightFromScreen({ token, id }) {
     await this.checkKey(token);
+    if (this.getDashboardAccess().isBrokerToken(token)) {
+      const session = this.getDashboardAccess().authorize(token);
+      if (this.getHighlight(session.screenId).highlight?.id !== id) return {};
+    }
     if (id != null) this.closeHighlight(id, 'screen');
     return {};
   }
