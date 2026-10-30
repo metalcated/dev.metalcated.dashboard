@@ -1,6 +1,9 @@
 // Only the immediate Homey settings frame may provide an embedded connection.
 // Credentials remain in memory and are never accepted through an address/query.
 export const embedded = new URLSearchParams(location.search).get('embedded') === '1' && window.parent !== window;
+// The desktop companion hosts the normal paired renderer. Its only extra authority is pausing an off-screen view;
+// authentication and configuration still use the standalone browser's own connection database.
+export const hosted = !embedded && new URLSearchParams(location.search).get('shell') === '1' && window.parent !== window;
 const fragment = new URLSearchParams((location.hash ?? '').slice(1));
 const nonce = fragment.get('bridge');
 const bridgeRequested = embedded && fragment.has('bridge');
@@ -34,7 +37,7 @@ if (embedded && !parentOrigin && !document.referrer) {
 
 let config = null;
 let pending = null;
-let parentVisible = true;
+let parentVisible = !hosted;
 const visibilityListeners = new Set();
 const requests = new Map();
 let requestSequence = 0;
@@ -65,7 +68,7 @@ export function notifyEmbedded(type, details = {}) {
   }
 }
 
-export const isDashboardVisible = () => document.visibilityState !== 'hidden' && (!embedded || parentVisible);
+export const isDashboardVisible = () => document.visibilityState !== 'hidden' && (!(embedded || hosted) || parentVisible);
 
 function announceVisibility() {
   for (const listener of visibilityListeners) listener(isDashboardVisible());
@@ -119,6 +122,22 @@ if (embedded) window.addEventListener('message', (event) => {
   if (bridgeRequested || !parentOrigin || event.source !== window.parent || event.origin !== parentOrigin) return;
   receive(event.data);
 });
+
+if (hosted) {
+  let hostOrigin = parentOrigin === location.origin ? parentOrigin : null;
+  if (!hostOrigin && !document.referrer) {
+    try {
+      const parent = new URL(window.parent.location.href);
+      if (parent.origin === location.origin && /^\/web\/homeys\/[a-f0-9]{24}(?:\/|$)/.test(parent.pathname)) hostOrigin = parent.origin;
+    } catch { /* A cross-origin parent cannot claim a passive same-Homey shell. */ }
+  }
+  window.addEventListener('message', (event) => {
+    if (!hostOrigin || event.source !== window.parent || event.origin !== hostOrigin
+      || event.data?.type !== 'dashboard:visibility' || typeof event.data.visible !== 'boolean') return;
+    parentVisible = event.data.visible;
+    announceVisibility();
+  });
+}
 
 function openChannel() {
   if (port) return;

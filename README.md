@@ -2,7 +2,7 @@
 
 A Homey app that shows your native Homey dashboards inside Homey's app view or in a browser on your home network. Supported widget edits save back to the same Homey dashboards used by iOS and Android.
 
-This fork adds an integrated dashboard workspace and automatic app authentication. Homey's SDK does not provide a documented way for apps to add a main navigation sidebar item. Open **Apps → Web Dashboard → Configure** for the supported in-Homey workspace; its **Dashboards** tab opens directly on your dashboards. A desktop sidebar lists your existing dashboards, and the title picker remains available on smaller screens and in the mobile view.
+The desktop companion adds **Dashboards** to the main navigation of your local Homey web app and opens the dashboard in the full content area. It keeps Homey's sidebar, theme and normal navigation. The companion is a separate browser extension: Homey's published app SDK does not offer a main-sidebar registration hook. The app's **Configure** view remains available for initial authorization and screen approvals.
 
 The app requests `homey:manager:api` access and brokers only supported dashboard operations. The built-in app credential stays on the backend. Some Homey firmware, including the tested self-hosted 13.5.3 server, does not grant native dashboard scopes to that credential. Those installations need a dedicated scoped dashboard key once; setup can create and save it directly on Homey after the owner approves the requested access. New displays still receive revocable broker connections, not that key.
 
@@ -11,8 +11,23 @@ The dashboard is static files in `assets/web/`, which Homey serves at `/app/dev.
 
 ## Using it
 
-1. Install/update the app and approve its Homey access. If the firmware restricts native dashboards, authorize the dedicated dashboard key during setup. Open **Apps → Web Dashboard → Configure**; the **Dashboards** tab then connects using the signed-in Homey app session.
-2. For a separate browser or wall display, choose **Open separately** or copy its address from **Connection & screens**. Approve its matching six-digit code there once. No API key needs to be copied.
+1. Install/update the app and approve its Homey access. If the firmware restricts native dashboards, authorize the dedicated dashboard key during setup. A key created under Homey's system API Keys also needs to be saved in this app; creating it alone does not connect the dashboard.
+2. Install the desktop companion for your local Homey web address, then choose **Dashboards** in Homey's main navigation. The first browser connection shows a six-digit approval code. Approve its matching code in **Apps → Web Dashboard → Configure → Connection & screens**; the browser then keeps its own limited connection in IndexedDB.
+3. Additional browsers and wall displays use that same one-time code approval. Reapproval is required after revocation or the connection's thirty-day expiration. No backend key is copied to a new display.
+
+### Desktop companion
+
+Build the companion for the exact local Homey origin and Homey ID:
+
+```sh
+node scripts/build-companion.cjs --origin http://YOUR_HOMEY_IP:4859 --homey-id YOUR_HOMEY_ID
+```
+
+The output is a fresh `companion/package` directory, ready for Chrome or Edge's **Load unpacked** control. The builder refuses to replace an existing output folder; use `--out FRESH_DIRECTORY` for another build. Extension installation requires the user's approval.
+
+The content script runs only on the configured local Homey's web route and checks the exact origin, port and Homey ID again before adding UI. It reads no Homey login tokens, cookies, storage, private application state or intercepted requests. It has no background service, network interception or unrestricted site permissions. The existing renderer performs its own normal pairing and keeps its limited connection in IndexedDB.
+
+The **Dashboards** navigation item opens the full-width workspace; **Connection** returns to the app's setup page, and **Open separately** opens the normal standalone view. Native navigation and browser history changes close the workspace. Hidden workspaces pause event polling and live camera streams while preserving an in-progress browser approval. The companion targets the local Homey web app; Homey's cloud web app and the native iOS/Android apps are separate interfaces. Shared layouts remain the same native Homey dashboards used on mobile.
 
 The embedded connection stays in memory. A separate approved screen stores an opaque, revocable dashboard connection in IndexedDB; the owner's Homey credential is never sent to that screen. Native screen identities are also stored in IndexedDB, separately for each Homey. Layouts remain stored in Homey, so mobile and web edits use the same dashboard objects.
 

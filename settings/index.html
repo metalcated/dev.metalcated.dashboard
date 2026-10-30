@@ -106,7 +106,8 @@
         <p id="key-message" class="homey-text-small" role="status" hidden></p>
         <p class="homey-text-small">
           The API key form in my.homey.app (Settings → API Keys) has no permission for dashboards, so a key made there
-          only works with <strong>Homey</strong> ticked. That gives full access, and every paired browser holds the key.
+          only works with <strong>Homey</strong> ticked. A dedicated scoped key can be prepared during setup instead.
+          The saved key stays on Homey; approved browsers receive a restricted connection.
         </p>
         <p class="homey-text-small">
           A key with only what the dashboard needs can be made with a tool that sets permissions directly, such as
@@ -115,7 +116,7 @@
         <pre class="command">homeyctl token create "Web Dashboard" --no-save --scopes homey.dashboard.readonly,homey.device.readonly,homey.device.control,homey.flow.readonly,homey.flow.start,homey.mood.readonly,homey.mood.set,homey.logic.readonly,homey.zone.readonly,homey.notifications.readonly,homey.app.readonly,homey.user.readonly,homey.user.self,homey.insights.readonly,homey.energy.readonly,homey.presence.self,homey.system.readonly,homey.geolocation.readonly</pre>
         <p class="homey-text-small">
           To change widgets on the web dashboards too (Edit, next to Settings), use <code>homey.dashboard</code> instead
-          of <code>homey.dashboard.readonly</code>. Every paired browser can then also change and delete dashboards.
+          of <code>homey.dashboard.readonly</code>. The app allows supported layout edits and blocks dashboard deletion.
         </p>
         <p class="homey-text-small">
           After saving, this page names anything missing or too broad. Paired browsers keep a copy of the key: to sign
@@ -477,7 +478,7 @@
             keyCheck.appendChild(list);
           };
           if (status.missing && status.missing.length) addList('Missing, so parts of the dashboard won’t work:', status.missing, 'message-error');
-          if (status.broad && status.broad.length) addList('Broader than needed (every paired browser can do this):', status.broad, 'message-error');
+          if (status.broad && status.broad.length) addList('Broader Homey access than the dashboard needs:', status.broad, 'message-error');
           if (!(status.missing && status.missing.length) && !(status.broad && status.broad.length)) {
             var ok = document.createElement('div');
             ok.className = 'homey-text-small message-ok';

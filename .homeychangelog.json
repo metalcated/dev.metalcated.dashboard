@@ -43,5 +43,8 @@
   },
   "1.4.8": {
     "en": "The embedded page receives Homey’s authorization failure immediately, preserving the useful reason instead of replacing it with a later generic connection timeout."
+  },
+  "1.5.0": {
+    "en": "Desktop companion adds Dashboards to the main navigation of the local Homey web app and opens a full-width workspace. Hosted views retain normal browser pairing and pause live cameras and updates while hidden."
   }
 }

@@ -101,6 +101,13 @@ test('recognizes full keys and combines an explicitly identified secret without 
   }
 });
 
+test('preserves the complete opaque token returned by Homey without prepending the separate record ID', async () => {
+  const opaqueToken = `homey-pat:opaque-prefix:${'b'.repeat(72)}`;
+  const mock = fixture({ result: { id: TOKEN_ID, name: DEDICATED_NAME, token: opaqueToken, scopes: [...DASHBOARD_SCOPES] } });
+  await authorize(mock.homey, approved);
+  assert.equal(mock.writes()[0].body.key, opaqueToken);
+});
+
 test('rechecks the destination and refuses to overwrite a key configured during authorization', async () => {
   const mock = fixture({ changed: true });
   await assert.rejects(authorize(mock.homey, approved), { code: 'APP_KEY_CHANGED' });

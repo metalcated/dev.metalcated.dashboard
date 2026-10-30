@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Homey Dashboard Companion",
+  "version": "1.0.0",
+  "description": "Open your dashboards from the main interface of your local Homey web app.",
+  "content_scripts": [
+    {
+      "matches": [],
+      "js": ["config.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle",
+      "all_frames": false,
+      "match_about_blank": false,
+      "match_origin_as_fallback": false,
+      "world": "ISOLATED"
+    }
+  ]
+}

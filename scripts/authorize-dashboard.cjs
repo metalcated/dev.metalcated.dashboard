@@ -34,9 +34,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SECRET = /^[^\s:\x00-\x1f\x7f]{1,4096}$/;
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const fullKey = (value) => {
-  if (typeof value !== 'string') return false;
-  const separator = value.indexOf(':');
-  return separator > 0 && UUID.test(value.slice(0, separator)) && SECRET.test(value.slice(separator + 1));
+  // Homey's live PAT response contains a complete opaque token, which may have a provider prefix rather than
+  // starting with the separately returned UUID. Preserve it exactly; the app validates its grant with Homey.
+  return typeof value === 'string' && value.includes(':') && /^[^\s\x00-\x1f\x7f]{1,4096}$/.test(value);
 };
 
 class AuthorizationError extends Error {
@@ -149,4 +149,4 @@ async function authorize(homey, { homeyId, approved = false, expectedVersion } =
   }
 }
 
-module.exports = { authorize, DASHBOARD_SCOPES, DEDICATED_NAME };
+module.exports = { authorize, DASHBOARD_SCOPES, DEDICATED_NAME, extractCreatedKey: extractKey };

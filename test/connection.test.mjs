@@ -123,6 +123,45 @@ test('embedded visibility is controlled by the trusted parent and the document t
   assert.deepEqual(seen, [false, false, true]);
 });
 
+test('the main Homey shell can pause its normal paired renderer without providing credentials', async () => {
+  const browser = embeddedBrowser(`${location.origin}/web/homeys/1234567890abcdef12345678/devices`);
+  const api = await load('embedded.js', { ...browser, location: { ...location, search: '?shell=1' } });
+  assert.equal(api.embedded, false);
+  assert.equal(api.hosted, true);
+  assert.equal(api.usesEmbeddedBroker(), false);
+  assert.equal(await api.waitForEmbeddedConfig(), null, 'the normal browser connection remains responsible for authentication');
+  assert.equal(api.isDashboardVisible(), false, 'a hidden host starts with cameras and event polling paused');
+  const event = { source: browser.parent, origin: location.origin, data: { type: 'dashboard:visibility', visible: true } };
+  const send = (changes = {}) => browser.windowEvents.get('message')({ ...event, ...changes });
+  send({ source: {} });
+  send({ origin: 'https://unrelated.example' });
+  send({ data: { type: 'dashboard:connect', config: { token: 'untrusted', homeyUrl: location.origin, transport: 'broker' } } });
+  assert.equal(api.isDashboardVisible(), false);
+  send();
+  assert.equal(api.isDashboardVisible(), true);
+  browser.document.visibilityState = 'hidden';
+  assert.equal(api.isDashboardVisible(), false);
+  browser.document.visibilityState = 'visible';
+  send({ data: { type: 'dashboard:visibility', visible: false } });
+  assert.equal(api.isDashboardVisible(), false);
+  assert.deepEqual(browser.sent, [], 'no API credential or channel challenge is sent to the shell');
+});
+
+test('passive shell origin verification has a same-origin Homey fallback and rejects unverified parents', async () => {
+  const browser = embeddedBrowser('');
+  browser.parent.location = { href: `${location.origin}/web/homeys/1234567890abcdef12345678` };
+  const api = await load('embedded.js', { ...browser, location: { ...location, search: '?shell=1' } });
+  browser.windowEvents.get('message')({ source: browser.parent, origin: location.origin, data: { type: 'dashboard:visibility', visible: true } });
+  assert.equal(api.isDashboardVisible(), true);
+  for (const referrer of ['', 'https://unrelated.example/home', 'invalid-referrer']) {
+    const rejected = embeddedBrowser(referrer);
+    rejected.parent.location = { href: 'https://unrelated.example/web/homeys/1234567890abcdef12345678' };
+    const module = await load('embedded.js', { ...rejected, location: { ...location, search: '?shell=1' } });
+    rejected.windowEvents.get('message')({ source: rejected.parent, origin: location.origin, data: { type: 'dashboard:visibility', visible: true } });
+    assert.equal(module.isDashboardVisible(), false);
+  }
+});
+
 test('an embedded frame with no verifiable parent fails closed; a stalled connection reports a retryable error', async () => {
   const missing = embeddedBrowser('');
   const noParent = await load('embedded.js', { ...missing, location });
