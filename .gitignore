@@ -3,3 +3,5 @@
 /.homeybuild/
 .DS_Store
 /companion/package/
+/companion/package-firefox/
+/companion/*-unsigned.zip

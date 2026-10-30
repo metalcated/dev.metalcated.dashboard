@@ -7,10 +7,19 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
-const { APP_ID, buildCompanion, matchPatterns, normalizeHomeyId, normalizeOrigin, normalizeOutput, parseArguments } = require('../scripts/build-companion.cjs');
+const { APP_ID, buildCompanion, matchPatterns, normalizeBrowser, normalizeHomeyId, normalizeOrigin, normalizeOutput, parseArguments } = require('../scripts/build-companion.cjs');
 
 const ID = '6add33dde406853bfda0bd09';
 const ORIGIN = 'http://192.168.80.87:4859';
+
+test('defaults to Chromium and normalizes only the supported browser targets', () => {
+  assert.equal(normalizeBrowser(), 'chromium');
+  for (const browser of ['chromium', 'chrome', 'edge']) assert.equal(normalizeBrowser(browser), 'chromium');
+  for (const browser of ['firefox', 'zen']) assert.equal(normalizeBrowser(browser), 'firefox');
+  for (const browser of [null, false, 1, '', 'safari', 'all', 'firefox,chromium', ' firefox ', '--out']) {
+    assert.throws(() => normalizeBrowser(browser), { code: 'INVALID_BROWSER' });
+  }
+});
 
 test('accepts only explicitly local HTTP(S) origins and retains the exact protocol and port', () => {
   for (const origin of [
@@ -57,13 +66,51 @@ test('argument validation refuses ambiguous options and paths with control chara
   assert.deepEqual(parseArguments(['--origin', ORIGIN, '--homey-id', ID, '--out', '/private/tmp/fresh-package']), {
     origin: ORIGIN, homeyId: ID, out: '/private/tmp/fresh-package',
   });
+  assert.deepEqual(parseArguments(['--origin', ORIGIN, '--browser', 'zen', '--homey-id', ID]), {
+    origin: ORIGIN, browser: 'firefox', homeyId: ID,
+  });
+  assert.deepEqual(parseArguments(['--browser', 'edge']), { browser: 'chromium' });
+  assert.throws(() => parseArguments(['--browser', 'unsupported']), { code: 'INVALID_BROWSER' });
   for (const args of [
     ['--origin'], ['--origin', ORIGIN, '--origin', ORIGIN], ['--replace', 'true'],
     ['--token', 'secret'], ['--homey-id', '--out'], ['--out=/private/tmp/package'],
+    ['--browser'], ['--browser', '--out'], ['--browser', ''],
+    ['--browser', 'firefox', '--browser', 'chromium'], ['--browser', 'zen', '--browser', 'firefox'],
   ]) assert.throws(() => parseArguments(args), { code: 'INVALID_ARGUMENTS' });
   for (const output of ['', '/', '/private/tmp/package\nother', '\0']) {
     assert.throws(() => normalizeOutput(output), { code: 'INVALID_OUTPUT' });
   }
+});
+
+test('builds Firefox and Zen packages from the same renderer with only the required Gecko metadata added', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'homey-companion-browsers-'));
+  const chromium = await buildCompanion({ origin: ORIGIN, homeyId: ID, browser: 'chromium', out: path.join(directory, 'chromium') });
+  const firefox = await buildCompanion({ origin: ORIGIN, homeyId: ID, browser: 'firefox', out: path.join(directory, 'firefox') });
+  const zen = await buildCompanion({ origin: ORIGIN, homeyId: ID, browser: 'zen', out: path.join(directory, 'zen') });
+  const template = JSON.parse(await fs.readFile(path.join(__dirname, '../companion/manifest.template.json'), 'utf8'));
+  for (const target of [chromium, firefox, zen]) {
+    assert.equal(target.manifest.version, template.version);
+    assert.deepEqual((await fs.readdir(target.output)).sort(), ['config.js', 'content.css', 'content.js', 'manifest.json']);
+  }
+  assert.equal(Object.hasOwn(chromium.manifest, 'browser_specific_settings'), false);
+  assert.deepEqual(firefox.manifest, {
+    ...chromium.manifest,
+    browser_specific_settings: {
+      gecko: {
+        id: 'homey-dashboard-companion@metalcated.dev', strict_min_version: '140.0',
+        data_collection_permissions: { required: ['none'] },
+      },
+    },
+  });
+  assert.deepEqual(zen.manifest, firefox.manifest);
+  for (const file of ['config.js', 'content.js', 'content.css']) {
+    const expected = await fs.readFile(path.join(chromium.output, file));
+    for (const target of [firefox, zen]) assert.deepEqual(await fs.readFile(path.join(target.output, file)), expected);
+  }
+  // Selecting another target must never replace an already-built package.
+  const original = await fs.readFile(path.join(firefox.output, 'manifest.json'));
+  await assert.rejects(buildCompanion({ origin: ORIGIN, homeyId: ID, browser: 'chromium', out: firefox.output }), { code: 'OUTPUT_EXISTS' });
+  assert.deepEqual(await fs.readFile(path.join(firefox.output, 'manifest.json')), original);
 });
 
 test('CLI errors never echo URL credentials, arguments, or a stack trace', () => {
@@ -75,6 +122,21 @@ test('CLI errors never echo URL credentials, arguments, or a stack trace', () =>
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /local Homey origin/);
   assert.doesNotMatch(result.stderr, /private-owner|do-not-print|192\.168|\n\s+at /);
+});
+
+test('CLI rejects missing, unknown, and duplicate browser values before writing a package', () => {
+  for (const args of [
+    ['--browser'], ['--browser', '--out'], ['--browser', 'unsupported'],
+    ['--browser', 'firefox', '--browser', 'chromium'],
+  ]) {
+    const result = spawnSync(process.execPath, [
+      path.join(__dirname, '../scripts/build-companion.cjs'), '--origin', ORIGIN, '--homey-id', ID, ...args,
+    ], { encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /--browser/);
+    assert.doesNotMatch(result.stderr, /\n\s+at /);
+  }
 });
 
 test('builds a complete isolated package with no extra permissions, URLs, or credentials and never overwrites it', async () => {
@@ -115,9 +177,10 @@ test('builds a complete isolated package with no extra permissions, URLs, or cre
   assert.equal(await fs.readFile(fileOutput, 'utf8'), 'keep existing data');
 });
 
-test('invalid origin or ID never creates an output directory', async () => {
+test('invalid browser, origin, or ID never creates an output directory', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'homey-companion-invalid-'));
   const output = path.join(directory, 'package');
+  await assert.rejects(buildCompanion({ origin: ORIGIN, homeyId: ID, browser: 'unsupported', out: output }), { code: 'INVALID_BROWSER' });
   await assert.rejects(buildCompanion({ origin: 'https://example.com', homeyId: ID, out: output }), { code: 'INVALID_ORIGIN' });
   await assert.rejects(buildCompanion({ origin: ORIGIN, homeyId: `${ID}*`, out: output }), { code: 'INVALID_HOMEY_ID' });
   await assert.rejects(fs.lstat(output), { code: 'ENOENT' });

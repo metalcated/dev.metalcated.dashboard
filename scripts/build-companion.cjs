@@ -60,6 +60,12 @@ function normalizeHomeyId(value) {
   return value.toLowerCase();
 }
 
+function normalizeBrowser(value = 'chromium') {
+  if (['chromium', 'chrome', 'edge'].includes(value)) return 'chromium';
+  if (['firefox', 'zen'].includes(value)) return 'firefox';
+  throw invalid('INVALID_BROWSER', 'Choose --browser chromium or --browser firefox.');
+}
+
 function matchPatterns(origin, homeyId) {
   const url = new URL(normalizeOrigin(origin));
   const id = normalizeHomeyId(homeyId);
@@ -80,19 +86,21 @@ function normalizeOutput(value = DEFAULT_OUT) {
 
 function parseArguments(args) {
   const options = {};
-  const names = new Map([['--origin', 'origin'], ['--homey-id', 'homeyId'], ['--out', 'out']]);
+  const names = new Map([['--origin', 'origin'], ['--homey-id', 'homeyId'], ['--out', 'out'], ['--browser', 'browser']]);
   for (let index = 0; index < args.length; index += 2) {
     const key = names.get(args[index]);
     const value = args[index + 1];
     if (!key || Object.hasOwn(options, key) || !value || value.startsWith('--')) {
-      throw invalid('INVALID_ARGUMENTS', 'Use --origin URL --homey-id ID [--out FRESH_DIRECTORY].');
+      throw invalid('INVALID_ARGUMENTS', 'Use --origin URL --homey-id ID [--browser chromium|firefox] [--out FRESH_DIRECTORY].');
     }
     options[key] = value;
   }
+  if (Object.hasOwn(options, 'browser')) options.browser = normalizeBrowser(options.browser);
   return options;
 }
 
 async function buildCompanion(options = {}) {
+  const browser = normalizeBrowser(options.browser);
   const config = Object.freeze({
     origin: normalizeOrigin(options.origin),
     homeyId: normalizeHomeyId(options.homeyId),
@@ -117,6 +125,15 @@ async function buildCompanion(options = {}) {
   }
   const manifest = JSON.parse(source[0]);
   manifest.content_scripts[0].matches = matchPatterns(config.origin, config.homeyId);
+  if (browser === 'firefox') {
+    manifest.browser_specific_settings = {
+      gecko: {
+        id: 'homey-dashboard-companion@metalcated.dev',
+        strict_min_version: '140.0',
+        data_collection_permissions: { required: ['none'] },
+      },
+    };
+  }
   const files = new Map([
     ['manifest.json', `${JSON.stringify(manifest, null, 2)}\n`],
     ['config.js', `'use strict';\nconst HOMEY_DASHBOARD_COMPANION = Object.freeze(${JSON.stringify(config, null, 2)});\n`],
@@ -146,4 +163,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { APP_ID, DEFAULT_OUT, buildCompanion, matchPatterns, normalizeHomeyId, normalizeOrigin, normalizeOutput, parseArguments };
+module.exports = { APP_ID, DEFAULT_OUT, buildCompanion, matchPatterns, normalizeBrowser, normalizeHomeyId, normalizeOrigin, normalizeOutput, parseArguments };

@@ -25,6 +25,18 @@ node scripts/build-companion.cjs --origin http://YOUR_HOMEY_IP:4859 --homey-id Y
 
 The output is a fresh `companion/package` directory, ready for Chrome or Edge's **Load unpacked** control. The builder refuses to replace an existing output folder; use `--out FRESH_DIRECTORY` for another build. Extension installation requires the user's approval.
 
+Firefox and Zen use the same Firefox package, built from the identical companion scripts and styles:
+
+```sh
+node scripts/build-companion.cjs --browser firefox --origin http://YOUR_HOMEY_IP:4859 --homey-id YOUR_HOMEY_ID --out companion/package-firefox
+```
+
+The Firefox build requires Firefox/Gecko 140 or newer and adds its stable add-on ID and declaration that the companion itself collects no data. It does not request additional permissions or include a Homey API key. Zen supports Firefox extensions; see [Zen's extension documentation](https://docs.zen-browser.app/user-manual/extensions). The builder also accepts `zen`, `chrome`, and `edge` as browser names; Chrome and Edge produce the same Chromium build. Omitting `--browser` preserves the Chromium default.
+
+For a temporary Firefox/Zen test, open `about:debugging`, choose **This Firefox** (or its Zen equivalent), then **Load Temporary Add-on** and select the generated `manifest.json`. This installation lasts until the browser restarts. Permanent Firefox Release/Beta installation requires a Mozilla-signed package; [unlisted signing](https://extensionworkshop.com/documentation/publish/signing-and-distribution-overview/) allows private self-distribution without a public store listing. The builder creates unsigned files only. Creating a ZIP or changing its extension to `.xpi` does not sign it, and the build does not change browser security settings or submit anything to Mozilla.
+
+Each browser profile or Firefox/Zen container uses its own Homey dashboard connection. On the first visit, approve that browser's six-digit code in the existing app connection screen. The backend dashboard key stays on Homey and does not need to be created or pasted again. Opening a dashboard loads the normal Homey renderer and its network requests; the companion itself reads no authentication or household data.
+
 The content script runs only on the configured local Homey's web route and checks the exact origin, port and Homey ID again before adding UI. It reads no Homey login tokens, cookies, storage, private application state or intercepted requests. It has no background service, network interception or unrestricted site permissions. The existing renderer performs its own normal pairing and keeps its limited connection in IndexedDB.
 
 The **Dashboards** navigation item opens the full-width workspace; **Connection** returns to the app's setup page, and **Open separately** opens the normal standalone view. Native navigation and browser history changes close the workspace. Hidden workspaces pause event polling and live camera streams while preserving an in-progress browser approval. The companion targets the local Homey web app; Homey's cloud web app and the native iOS/Android apps are separate interfaces. Shared layouts remain the same native Homey dashboards used on mobile.
@@ -164,9 +176,9 @@ Every Homey address serves every app's files, so an app's own page opened on the
 A sandboxed widget has no storage, which breaks widgets that cache or remember things in `localStorage`. In a widget's settings, *Runs* offers two other ways, chosen per widget and kept by the app for every browser:
 
 - **Sandboxed with storage**: the page fetches the widget's HTML and loads it as `srcdoc`, still sandboxed, with a `<base>` for its folder and a script in front that gives it a `localStorage` this page keeps per app (256 KB each; an app's widgets share it, changes reach its other open frames) and a `sessionStorage` for the frame's lifetime. URLs built from `location.href` resolve against the widget's real address, so `Homey.getWidgetInstanceId()` works, but code that reads `location.search` or `location.pathname` itself sees `about:srcdoc`.
-- **Trusted**: no sandbox, as in the Homey app. The widget can read the key every paired browser uses.
+- **Trusted**: no sandbox, as in the Homey app. The widget can access the page's stored connection. For a legacy manual-key connection, this includes the personal key; a new broker connection contains a revocable dashboard session instead. Only use this mode for widgets you trust.
 
-Pairing hands every approved browser the same key, so it lives in the app settings and in each browser's storage. Anyone on the network can ask for a code, but only a browser you approve gets the key, and only the browser holding the random poll id can collect it. To sign out one browser, clear its storage (**Settings → Forget** on the dashboard); to sign out all of them, delete the key in my.homey.app and save a new one. Never give the key `homey.app.control`: with it, a paired browser could change this app's settings and approve itself or others.
+Legacy manual-key connections can store the same personal key on several displays. Clearing one display's storage removes its local copy; revoking that personal key invalidates every display using it. Never give a legacy display key `homey.app.control`: it could change this app's settings and approve other displays. New pairing approvals instead return a separate opaque broker connection for each approved screen. **Forget** in the app's screen list revokes that screen's broker connections, and the dedicated backend key remains on Homey. A pairing code can only be collected by the browser holding its random polling ID after approval.
 
 ## Licence
 
