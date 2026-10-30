@@ -14,20 +14,29 @@ import { state } from '../state.js';
 
 const KEEP_ALIVE = 30_000; // Homey drops a stream after two minutes without one.
 const RETRY = 10_000;
+const FIRST_MEDIA = 60_000;
 
-// video id → shared stream, while any widget shows it.
+// video id → connection owner and shared stream, while any widget shows it.
 const streams = new Map();
 
-function iceGathered(pc, timeout) {
-  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+function iceGathered(pc, timeout, signal) {
+  if (pc.iceGatheringState === 'complete' || signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
+    let finished = false;
+    let timer;
     const done = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
       pc.removeEventListener('icegatheringstatechange', check);
+      signal.removeEventListener('abort', done);
       resolve();
     };
     const check = () => pc.iceGatheringState === 'complete' && done();
     pc.addEventListener('icegatheringstatechange', check);
-    setTimeout(done, timeout);
+    signal.addEventListener('abort', done, { once: true });
+    timer = setTimeout(done, timeout);
+    check();
   });
 }
 
@@ -35,79 +44,130 @@ function iceGathered(pc, timeout) {
 // what to show instead of "Live". subscribe(fn) calls fn with it on every change and returns an unsubscribe; the stream
 // runs while anyone is subscribed.
 function liveStream(videoId) {
-  if (streams.has(videoId)) return streams.get(videoId);
+  const client = state.client;
+  const existing = streams.get(videoId);
+  if (existing?.client === client) return existing.shared;
+  existing?.retire();
   const listeners = new Set();
   const shared = { stream: null, status: 'Connecting…' };
   let pc = null;
   let keepAlive = null;
   let retry = null;
+  let firstMedia = null;
   let stopWatchingVisibility = null;
-  const api = (path, payload) => state.client.api('POST', `/api/manager/videos/video/${videoId}${path}`, payload);
+  let gathering = null;
+  let generation = 0;
+  let retired = false;
+  let negotiating = false;
+  let manualRetryRequired = false;
+  const api = (path, payload) => client.api('POST', `/api/manager/videos/video/${videoId}${path}`, payload);
+  const canRun = () => !retired && listeners.size > 0 && state.client === client && isDashboardVisible();
   const emit = () => listeners.forEach((listener) => listener(shared));
   const showStatus = (text) => {
+    if (text === '') {
+      clearTimeout(firstMedia);
+      firstMedia = null;
+    }
     shared.status = text;
     emit();
   };
 
   function stop() {
+    generation += 1;
     clearInterval(keepAlive);
     clearTimeout(retry);
-    pc?.close();
+    clearTimeout(firstMedia);
+    keepAlive = null;
+    retry = null;
+    firstMedia = null;
+    negotiating = false;
+    gathering?.abort();
+    gathering = null;
+    const connection = pc;
     pc = null;
     shared.stream = null;
+    connection?.close();
   }
 
   function retryLater(message) {
     stop();
     showStatus(message);
-    if (listeners.size > 0 && isDashboardVisible()) retry = setTimeout(start, RETRY);
+    if (canRun()) retry = setTimeout(start, RETRY);
   }
 
   async function start() {
-    stop();
-    if (!isDashboardVisible()) {
+    if (manualRetryRequired) return;
+    if (!canRun()) {
       showStatus('Paused');
       return;
     }
+    // Parent and document visibility can both announce the same transition.
+    // Repeated taps while negotiating must keep the existing peer as well.
+    if (pc) return;
+    clearTimeout(retry);
+    retry = null;
+    const run = ++generation;
+    negotiating = true;
+    let connection;
+    const ownsAttempt = () => generation === run && canRun();
+    const current = () => ownsAttempt() && pc === connection;
     showStatus('Connecting…');
-    const connection = new RTCPeerConnection();
-    pc = connection;
-    connection.addTransceiver('video', { direction: 'recvonly' });
-    connection.addTransceiver('audio', { direction: 'recvonly' });
-    connection.addEventListener('track', (event) => {
-      if (pc !== connection) return;
-      const stream = shared.stream ?? event.streams[0] ?? new MediaStream();
-      if (!stream.getTracks().includes(event.track)) stream.addTrack(event.track);
-      shared.stream = stream;
-      // A remote track stays muted until its first packets arrive, which is when there is something to show.
-      if (event.track.kind === 'video') {
-        const live = () => pc === connection && shared.status !== '' && showStatus('');
-        event.track.addEventListener('unmute', live);
-        if (!event.track.muted) live();
-      }
-      emit();
-    });
-    connection.addEventListener('connectionstatechange', () => {
-      if (pc !== connection) return;
-      if (connection.connectionState === 'failed' || connection.connectionState === 'disconnected') retryLater('Reconnecting…');
-    });
     try {
-      await connection.setLocalDescription(await connection.createOffer());
-      await iceGathered(connection, 3000);
+      connection = new RTCPeerConnection();
+      pc = connection;
+      firstMedia = setTimeout(() => {
+        if (!current() || shared.status === '') return;
+        manualRetryRequired = true;
+        stop();
+        showStatus('Camera did not send video. Tap to retry.');
+      }, FIRST_MEDIA);
+      connection.addTransceiver('video', { direction: 'recvonly' });
+      connection.addTransceiver('audio', { direction: 'recvonly' });
+      connection.addEventListener('track', (event) => {
+        if (!current()) return;
+        const stream = shared.stream ?? event.streams[0] ?? new MediaStream();
+        if (!stream.getTracks().includes(event.track)) stream.addTrack(event.track);
+        shared.stream = stream;
+        // A remote track stays muted until its first packets arrive, which is when there is something to show.
+        if (event.track.kind === 'video') {
+          const live = () => current() && shared.status !== '' && showStatus('');
+          event.track.addEventListener('unmute', live);
+          if (!event.track.muted) live();
+        }
+        emit();
+      });
+      connection.addEventListener('connectionstatechange', () => {
+        if (!current()) return;
+        if (connection.connectionState === 'failed' || connection.connectionState === 'disconnected') retryLater('Reconnecting…');
+      });
+      const offer = await connection.createOffer();
+      if (!current()) return;
+      await connection.setLocalDescription(offer);
+      if (!current()) return;
+      const controller = new AbortController();
+      gathering = controller;
+      await iceGathered(connection, 3000, controller.signal);
+      if (gathering === controller) gathering = null;
+      if (!current()) return;
       const { answerSdp, streamId } = await api('/offer', { offer: connection.localDescription.sdp });
-      if (pc !== connection) return;
+      if (!current()) return;
       await connection.setRemoteDescription({ type: 'answer', sdp: answerSdp });
-      if (streamId) keepAlive = setInterval(() => api('/keep-alive', { streamId }).catch(() => {}), KEEP_ALIVE);
+      if (!current()) return;
+      if (streamId) keepAlive = setInterval(() => {
+        if (current()) api('/keep-alive', { streamId }).catch(() => {});
+      }, KEEP_ALIVE);
     } catch (error) {
-      if (pc === connection) retryLater(`No live video: ${error.message}`);
+      if (ownsAttempt()) retryLater(`No live video: ${error.message}`);
+    } finally {
+      if (generation === run) negotiating = false;
     }
   }
 
   const onVisibility = () => {
-    if (isDashboardVisible()) start();
+    if (canRun()) start();
     else {
       stop();
-      showStatus('Paused');
+      if (!manualRetryRequired) showStatus('Paused');
     }
   };
 
@@ -122,20 +182,34 @@ function liveStream(videoId) {
     return () => {
       listeners.delete(listener);
       if (listeners.size > 0) return;
+      retired = true;
       stopWatchingVisibility?.();
+      stopWatchingVisibility = null;
       stop();
-      streams.delete(videoId);
+      if (streams.get(videoId)?.shared === shared) streams.delete(videoId);
     };
   };
   // After an error, a tap on the status tries again.
   shared.retry = () => {
-    if (shared.status !== '') start();
+    if (shared.status === '') return;
+    manualRetryRequired = false;
+    // Keep an in-flight offer, but retain the manual recovery action when an
+    // accepted connection never delivers video.
+    if (pc && !negotiating) stop();
+    start();
   };
   // A widget saw a frame; covers browsers that don't report the track unmuting.
-  shared.playing = () => {
-    if (pc != null && shared.status === 'Connecting…') showStatus('');
+  shared.playing = (stream) => {
+    if (canRun() && pc != null && stream != null && stream === shared.stream
+      && stream.getTracks().some((track) => track.kind === 'video') && shared.status === 'Connecting…') showStatus('');
   };
-  streams.set(videoId, shared);
+  streams.set(videoId, { client, shared, retire() {
+    retired = true;
+    stopWatchingVisibility?.();
+    stopWatchingVisibility = null;
+    stop();
+    showStatus('Paused');
+  } });
   return shared;
 }
 
@@ -151,10 +225,11 @@ export function mountCameraLive({ body, widget }) {
   player.muted = true;
   player.playsInline = true;
   player.autoplay = true;
-  // A fresh snapshot to show until the stream plays. Not when the stream is already live for another widget: its next
-  // frame is a moment away, and the large snapshot would load and draw first on a slow device.
+  // Show the saved camera preview until the stream plays. Cache-busting reloads that image; it does not request a
+  // new capture. Skip it when another widget already plays this stream, whose next frame is a moment away.
   const snapshot = device.images?.find((image) => image.type === 'camera')?.imageObj?.url;
-  if (snapshot && streams.get(videoId)?.status !== '') player.poster = `${state.client.base}${snapshot}?v=${Date.now()}`;
+  const existing = streams.get(videoId);
+  if (snapshot && (existing?.client !== state.client || existing.shared.status !== '')) player.poster = `${state.client.base}${snapshot}?v=${Date.now()}`;
   // Like the app: the name and the stream's title over the picture, a red "Live" once it plays, a full-screen button.
   const overlay = el('div', 'camera-overlay');
   overlay.append(el('div', 'camera-name', `${widget.title ?? device.name} - ${video.title ?? 'Live'}`));
@@ -196,7 +271,7 @@ export function mountCameraLive({ body, widget }) {
     }
     showStatus(text);
   };
-  player.addEventListener('loadeddata', () => shared?.playing());
+  player.addEventListener('loadeddata', () => shared?.playing(player.srcObject));
   const play = () => {
     if (unsubscribe) return shared.retry();
     shared = liveStream(videoId);

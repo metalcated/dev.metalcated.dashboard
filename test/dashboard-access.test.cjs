@@ -376,6 +376,80 @@ test('realtime polls subscribe once, filter events, detach, survive restart, and
   await f.access.close();
 });
 
+test('resuming after final-topic pruning resets even when no event advanced the cursor', async () => {
+  const f = fixture();
+  const { token } = f.access.issue({ screenId: SCREEN });
+  const subscriptions = [{ uri: 'homey:manager:dashboards', event: 'dashboard.update' }];
+  const first = await f.access.events({ token, subscriptions });
+  assert.equal(first.reset, undefined, 'a first poll without a cursor starts normally');
+  assert.deepEqual(first.events, []);
+  const healthy = await f.access.events({ token, subscriptions, cursor: first.cursor });
+  assert.equal(healthy.reset, undefined, 'an active poll with unchanged coverage does not reset');
+  f.advance(120001);
+  await f.tickTimers();
+  assert.equal(f.access.pollers.size, 0);
+  assert.equal(f.access.topics.size, 0);
+  const resumed = await f.access.events({ token, subscriptions, cursor: healthy.cursor });
+  assert.equal(resumed.cursor, first.cursor, 'the event sequence alone cannot reveal the observation gap');
+  assert.equal(resumed.reset, true);
+  assert.deepEqual(resumed.events, []);
+  assert.equal(f.topics.get(subscriptions[0].uri).listenerCount('realtime'), 1);
+  assert.equal((await f.access.events({ token, subscriptions, cursor: resumed.cursor })).reset, undefined,
+    'the replacement registration establishes coverage for following polls');
+  await f.access.close();
+});
+
+test('a stale poller resets before its lastSeen is refreshed even if pruning has not run', async () => {
+  const f = fixture();
+  const { token } = f.access.issue({ screenId: SCREEN });
+  const subscriptions = [{ uri: 'homey:manager:dashboards', event: 'dashboard.update' }];
+  const first = await f.access.events({ token, subscriptions });
+  f.advance(120001);
+  assert.equal(f.access.pollers.size, 1, 'the timer has not pruned the stale record yet');
+  const resumed = await f.access.events({ token, subscriptions, cursor: first.cursor });
+  assert.equal(resumed.reset, true);
+  assert.equal(f.released.has(subscriptions[0].uri), false, 'resetting the cursor does not tear down an existing shared topic');
+  await f.access.close();
+});
+
+test('adding a previously unobserved topic resets even when another screen just registered it', async () => {
+  const f = fixture();
+  const first = f.access.issue({ screenId: SCREEN });
+  const second = f.access.issue({ screenId: 'screen-second-tab' });
+  const dashboards = { uri: 'homey:manager:dashboards', event: 'dashboard.update' };
+  const users = { uri: 'homey:manager:users', event: 'user.update' };
+  const initial = await f.access.events({ token: first.token, subscriptions: [dashboards] });
+  await f.access.events({ token: second.token, subscriptions: [users] });
+  const expanded = await f.access.events({ token: first.token, subscriptions: [dashboards, users], cursor: initial.cursor });
+  assert.equal(expanded.cursor, initial.cursor);
+  assert.equal(expanded.reset, true, 'the new topic was not observed throughout the first screen’s cursor interval');
+  assert.equal(f.topics.get(users.uri).listenerCount('realtime'), 1, 'screens still share one registered listener');
+  assert.equal((await f.access.events({ token: first.token, subscriptions: [dashboards, users], cursor: expanded.cursor })).reset, undefined);
+  await f.access.close();
+});
+
+test('different active pollers preserve shared history and continuously observed new subscriptions', async () => {
+  const f = fixture();
+  const first = f.access.issue({ screenId: SCREEN });
+  const second = f.access.issue({ screenId: 'screen-second-tab' });
+  const dashboards = { uri: 'homey:manager:dashboards', event: 'dashboard.update' };
+  const users = { uri: 'homey:manager:users', event: 'user.update' };
+  const secondStart = await f.access.events({ token: second.token, subscriptions: [dashboards, users] });
+  const firstStart = await f.access.events({ token: first.token, subscriptions: [dashboards] });
+  f.advance(60000);
+  const secondNext = await f.access.events({ token: second.token, subscriptions: [dashboards, users], cursor: secondStart.cursor });
+  assert.equal(secondNext.reset, undefined);
+  f.topics.get(users.uri).emit('realtime', 'user.update', { id: 'user-123', present: true });
+  const expanded = await f.access.events({ token: first.token, subscriptions: [dashboards, users], cursor: firstStart.cursor });
+  assert.equal(expanded.reset, undefined, 'another active screen observed this topic before the first screen’s cursor');
+  assert.deepEqual(expanded.events, [{ uri: users.uri, event: users.event, data: { id: 'user-123', present: true } }]);
+  await f.access.events({ token: first.token, subscriptions: [dashboards], cursor: expanded.cursor });
+  assert.equal(f.released.has(users.uri), false, 'the second screen still owns its subscriptions');
+  assert.equal(f.topics.get(users.uri).listenerCount('realtime'), 1);
+  assert.equal((await f.access.events({ token: second.token, subscriptions: [dashboards, users], cursor: secondNext.cursor })).reset, undefined);
+  await f.access.close();
+});
+
 test('shutdown awaits owned API unregister calls, handles failures, and releases an in-flight registration', async () => {
   const f = fixture();
   const { token } = f.access.issue({ screenId: SCREEN });

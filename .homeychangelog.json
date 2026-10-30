@@ -46,5 +46,8 @@
   },
   "1.5.0": {
     "en": "Desktop companion adds Dashboards to the main navigation of the local Homey web app and opens a full-width workspace. Hosted views retain normal browser pairing and pause live cameras and updates while hidden."
+  },
+  "1.5.1": {
+    "en": "Live cameras keep one connection across duplicate visibility notifications and cancel obsolete connection attempts cleanly. A camera that sends no video shows a bounded retry message. Resuming after an event-subscription gap reloads current Homey data instead of leaving an older dashboard visible."
   }
 }
