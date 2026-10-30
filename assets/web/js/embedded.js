@@ -8,6 +8,24 @@ try {
 } catch {
   // Without a verifiable parent, embedding fails closed rather than accepting any sender.
 }
+// Homey's local settings view can suppress Referrer entirely. In that case,
+// reading the immediate parent's location is itself a same-origin browser check.
+// Accept only this app's settings document, never another app or a claimed URL
+// supplied through a message.
+if (embedded && !parentOrigin && !document.referrer) {
+  try {
+    const app = /^\/app\/([^/]+)\/assets\/web\/index\.html$/.exec(location.pathname);
+    const parent = new URL(window.parent.location.href);
+    const settings = app && `/app/${app[1]}/settings`;
+    if (settings && ['http:', 'https:'].includes(parent.protocol)
+      && parent.origin === location.origin && !parent.username && !parent.password
+      && [settings, `${settings}/`, `${settings}/index.html`].includes(parent.pathname)) {
+      parentOrigin = parent.origin;
+    }
+  } catch {
+    // Cross-origin parent access throws. Keep the connection closed.
+  }
+}
 
 let config = null;
 let pending = null;

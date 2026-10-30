@@ -133,6 +133,51 @@ test('an embedded frame with no verifiable parent fails closed; a stalled connec
   assert.equal(stalled.sent.at(-1).origin, 'https://my.homey.app');
 });
 
+test('an empty referrer can use the browser-verified same-origin settings parent for this app', async () => {
+  const browser = embeddedBrowser('');
+  browser.parent.location = { href: `${location.origin}/app/test.dashboard/settings/index.html` };
+  const api = await load('embedded.js', { ...browser, location });
+  const pending = api.waitForEmbeddedConfig();
+  const connection = { homeyUrl: location.origin, token: opaque, transport: 'broker', screenId: 'native-screen' };
+  browser.windowEvents.get('message')({
+    source: browser.parent, origin: location.origin,
+    data: { type: 'dashboard:connect', config: connection },
+  });
+  assert.deepEqual(structuredClone(await pending), connection);
+  assert.equal(browser.sent[0].message.type, 'dashboard:ready');
+  assert.equal(browser.sent[0].origin, location.origin);
+});
+
+test('the empty-referrer fallback rejects other apps, unrelated paths, and another origin', async () => {
+  const cases = [
+    `${location.origin}/app/another.dashboard/settings/index.html`,
+    `${location.origin}/web/settings`,
+    `${location.origin}/app/test.dashboard/settings/nested/index.html`,
+    'https://another.example/app/test.dashboard/settings/index.html',
+    'http://homey.local:9999/app/test.dashboard/settings/index.html',
+    'http://user:password@homey.local:4859/app/test.dashboard/settings/index.html',
+  ];
+  for (const href of cases) {
+    const browser = embeddedBrowser('');
+    browser.parent.location = { href };
+    const api = await load('embedded.js', { ...browser, location });
+    await assert.rejects(api.waitForEmbeddedConfig(), /Open this dashboard from its Homey app view/, href);
+    assert.equal(browser.sent.length, 0);
+  }
+});
+
+test('the fallback cannot bypass a cross-origin location access denial or a malformed nonempty referrer', async () => {
+  const crossOrigin = embeddedBrowser('');
+  Object.defineProperty(crossOrigin.parent, 'location', { get() { throw new Error('Cross-origin access denied'); } });
+  const blocked = await load('embedded.js', { ...crossOrigin, location });
+  await assert.rejects(blocked.waitForEmbeddedConfig(), /Open this dashboard from its Homey app view/);
+
+  const malformed = embeddedBrowser('not-a-valid-referrer');
+  malformed.parent.location = { href: `${location.origin}/app/test.dashboard/settings/index.html` };
+  const invalid = await load('embedded.js', { ...malformed, location });
+  await assert.rejects(invalid.waitForEmbeddedConfig(), /Open this dashboard from its Homey app view/);
+});
+
 test('legacy browser configuration migrates to the database without modifying localStorage', async () => {
   const migrated = [];
   const connection = { token: 'legacy-test-key' };

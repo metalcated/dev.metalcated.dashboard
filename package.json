@@ -1,6 +1,6 @@
 {
   "name": "dev.schweiger.dashboard",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "Your Homey dashboards in any browser.",
   "main": "app.js",
   "license": "GPL-3.0-only",

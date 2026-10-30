@@ -25,5 +25,8 @@
   },
   "1.4.2": {
     "en": "The integrated workspace uses the working Homey settings address on your local network, including self-hosted servers whose generated secure hostname cannot be resolved."
+  },
+  "1.4.3": {
+    "en": "Automatic connection also works when the browser omits the embedded dashboard referrer, after verifying the same-origin Homey app settings page."
   }
 }
