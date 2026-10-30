@@ -1,4 +1,8 @@
-/* All companion styling is scoped to its own nodes; Homey's layout and bundles remain untouched. */
+/* Companion rules target its own nodes or the reversible marker on covered secondary navigation. */
+[data-metalcated-dashboard-companion-hidden="true"],
+[data-metalcated-dashboard-companion-hidden="true"] * {
+  visibility: hidden !important;
+}
 .mdc-nav-entry .mdc-nav-icon {
   display: block;
   width: 24px;

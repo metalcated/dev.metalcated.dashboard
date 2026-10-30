@@ -12,6 +12,7 @@ const PREFIX = `/web/homeys/${HOMEY}`;
 const NAV_ID = 'metalcated-dashboard-companion-nav';
 const PANEL_ID = 'metalcated-dashboard-companion-panel';
 const FRAME_ID = 'metalcated-dashboard-companion-frame';
+const HIDDEN_SECONDARY = 'data-metalcated-dashboard-companion-hidden';
 
 // The fixture models the observed Homey main navigation, including its narrow
 // nav inside a wider container. No network, credentials, browser storage, or
@@ -422,9 +423,56 @@ test('covered content is inert while open and exact prior inert state is restore
   assert.deepEqual(host.forbidden, []);
 });
 
+test('only the secondary title and sidebar are visually hidden without altering their layout or native styling', () => {
+  const host = browser();
+  const secondary = [host.secondaryHeader, host.secondarySidebar];
+  const before = secondary.map((node) => {
+    node.setAttribute('style', 'color: red; min-width: 280px;');
+    node.classList.add('native-existing-class');
+    return { classes: node.className, style: node.getAttribute('style') };
+  });
+  host.load(); host.node(NAV_ID).click(); host.settle();
+  for (const [index, node] of secondary.entries()) {
+    assert.equal(node.getAttribute(HIDDEN_SECONDARY), 'true');
+    assert.equal(node.hidden, false, 'visibility preserves the native sidebar layout');
+    assert.equal(node.className, before[index].classes);
+    assert.equal(node.getAttribute('style'), before[index].style);
+  }
+  for (const node of [host.main, host.nav, host.logo, host.container, host.navRoot]) assert.equal(node.hasAttribute(HIDDEN_SECONDARY), false);
+  const css = fs.readFileSync(path.join(__dirname, '../companion/content.css'), 'utf8');
+  assert.match(css, /\[data-metalcated-dashboard-companion-hidden="true"\],\s*\[data-metalcated-dashboard-companion-hidden="true"\]\s*\*\s*\{\s*visibility:\s*hidden\s*!important;/);
+  host.node(PANEL_ID).querySelector('.mdc-back').click();
+  for (const [index, node] of secondary.entries()) {
+    assert.equal(node.getAttribute(HIDDEN_SECONDARY), null);
+    assert.equal(node.className, before[index].classes);
+    assert.equal(node.getAttribute('style'), before[index].style);
+  }
+  assert.deepEqual(host.forbidden, []);
+});
+
+test('repeated open and close restores exact preexisting secondary markers including empty attributes', () => {
+  const host = browser();
+  host.secondaryHeader.setAttribute(HIDDEN_SECONDARY, 'original-header-marker');
+  host.secondarySidebar.setAttribute(HIDDEN_SECONDARY, '');
+  host.main.setAttribute(HIDDEN_SECONDARY, 'untouched-main-marker');
+  host.load();
+  for (let cycle = 0; cycle < 2; cycle++) {
+    host.node(NAV_ID).click(); host.settle();
+    assert.equal(host.secondaryHeader.getAttribute(HIDDEN_SECONDARY), 'true');
+    assert.equal(host.secondarySidebar.getAttribute(HIDDEN_SECONDARY), 'true');
+    assert.equal(host.main.getAttribute(HIDDEN_SECONDARY), 'untouched-main-marker');
+    host.document.emit('keydown', { key: 'Escape' });
+    assert.equal(host.secondaryHeader.getAttribute(HIDDEN_SECONDARY), 'original-header-marker');
+    assert.equal(host.secondarySidebar.getAttribute(HIDDEN_SECONDARY), '');
+    assert.equal(host.main.getAttribute(HIDDEN_SECONDARY), 'untouched-main-marker');
+  }
+  assert.deepEqual(host.forbidden, []);
+});
+
 test('replacement main and secondary sidebar at the same route inherit isolation without disabling the rail', () => {
   const host = browser();
   host.secondaryHeader.setAttribute('inert', 'preexisting');
+  host.secondaryHeader.setAttribute(HIDDEN_SECONDARY, 'old-header-marker');
   host.load(); host.node(NAV_ID).click(); host.settle();
   const oldMain = host.replaceMain();
   const oldSecondary = host.replaceSecondary();
@@ -432,10 +480,15 @@ test('replacement main and secondary sidebar at the same route inherit isolation
   assert.equal(oldMain.inert, false, 'detached content returns to its original state');
   assert.equal(oldSecondary[0].getAttribute('inert'), 'preexisting');
   assert.equal(oldSecondary[1].inert, false);
+  assert.equal(oldSecondary[0].getAttribute(HIDDEN_SECONDARY), 'old-header-marker');
+  assert.equal(oldSecondary[1].getAttribute(HIDDEN_SECONDARY), null);
+  for (const node of [host.secondaryHeader, host.secondarySidebar]) assert.equal(node.getAttribute(HIDDEN_SECONDARY), 'true');
+  assert.equal(host.main.hasAttribute(HIDDEN_SECONDARY), false);
   for (const node of [host.main, host.secondaryHeader, host.secondarySidebar]) assert.equal(node.inert, true);
   assert.equal(host.nav.inert, false); assert.equal(host.logo.inert, false);
   assert.equal(host.native('Flows').click().defaultPrevented, false);
   for (const node of [host.main, host.secondaryHeader, host.secondarySidebar]) assert.equal(node.inert, false);
+  for (const node of [host.secondaryHeader, host.secondarySidebar]) assert.equal(node.hasAttribute(HIDDEN_SECONDARY), false);
   assert.equal(host.node(PANEL_ID).hidden, true);
   assert.deepEqual(host.forbidden, []);
 });
@@ -450,11 +503,14 @@ test('every route and page-cache teardown restores covered controls, including p
   ]) {
     const host = browser();
     host.secondarySidebar.setAttribute('inert', 'retained-native-state');
+    host.secondaryHeader.setAttribute(HIDDEN_SECONDARY, 'retained-header-marker');
     host.load(); host.node(NAV_ID).click(); host.settle();
     teardown(host); host.settle();
     assert.equal(host.main.inert, false);
     assert.equal(host.secondaryHeader.inert, false);
     assert.equal(host.secondarySidebar.getAttribute('inert'), 'retained-native-state');
+    assert.equal(host.secondaryHeader.getAttribute(HIDDEN_SECONDARY), 'retained-header-marker');
+    assert.equal(host.secondarySidebar.hasAttribute(HIDDEN_SECONDARY), false);
     assert.equal(host.nav.inert, false); assert.equal(host.logo.inert, false);
     assert.deepEqual(host.forbidden, []);
   }
@@ -476,11 +532,15 @@ test('unfamiliar layout boundaries keep the standalone link and never disable na
 });
 
 test('an unfamiliar replacement while open retires the overlay and restores the vendor interface', () => {
-  const host = browser(); host.load(); host.node(NAV_ID).click(); host.settle();
+  const host = browser();
+  host.secondaryHeader.setAttribute(HIDDEN_SECONDARY, 'original-header');
+  host.load(); host.node(NAV_ID).click(); host.settle();
   const unknown = new host.Element(); host.container.append(unknown);
   host.notify([{ type: 'childList', target: host.container, addedNodes: [unknown], removedNodes: [] }]);
   assert.equal(host.node(PANEL_ID).hidden, true);
   for (const node of [host.main, host.secondaryHeader, host.secondarySidebar, host.nav, host.logo, unknown]) assert.equal(node.inert, false);
+  assert.equal(host.secondaryHeader.getAttribute(HIDDEN_SECONDARY), 'original-header');
+  assert.equal(host.secondarySidebar.hasAttribute(HIDDEN_SECONDARY), false);
   assert.deepEqual(host.forbidden, []);
 });
 
@@ -665,19 +725,26 @@ test('Connection opens settings separately while retaining the waiting pairing r
 
 test('two page-cache restores reattach one entry, resume route watching and clean up every exit', () => {
   const host = browser();
+  host.secondaryHeader.setAttribute(HIDDEN_SECONDARY, 'original-cached-header');
   host.load();
   for (let cycle = 0; cycle < 2; cycle++) {
     host.node(NAV_ID).click(); host.settle();
+    assert.equal(host.secondaryHeader.getAttribute(HIDDEN_SECONDARY), 'true');
+    assert.equal(host.secondarySidebar.getAttribute(HIDDEN_SECONDARY), 'true');
     host.window.emit('pagehide', { persisted: true });
     host.settle();
     assert.equal(host.node(NAV_ID), null);
     assert.equal(host.node(PANEL_ID), null);
+    assert.equal(host.secondaryHeader.getAttribute(HIDDEN_SECONDARY), 'original-cached-header');
+    assert.equal(host.secondarySidebar.hasAttribute(HIDDEN_SECONDARY), false);
     host.window.emit('pageshow', { persisted: true });
     host.settle();
     assert.equal(host.document.querySelectorAll(`#${NAV_ID}`).length, 1);
     host.node(NAV_ID).click(); host.settle();
     host.navigate(`${PREFIX}/flows?cycle=${cycle}`);
     assert.equal(host.node(PANEL_ID).hidden, true, 'route polling resumes after cache restore');
+    assert.equal(host.secondaryHeader.getAttribute(HIDDEN_SECONDARY), 'original-cached-header');
+    assert.equal(host.secondarySidebar.hasAttribute(HIDDEN_SECONDARY), false);
   }
   assert.deepEqual(host.forbidden, []);
 });

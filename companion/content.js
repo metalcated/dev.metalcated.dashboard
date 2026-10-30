@@ -20,6 +20,7 @@
   const frameUrl = `${cleanUrl}?shell=1`;
   const settingsUrl = `${origin}${prefix}/settings/apps/${encodeURIComponent(config.appId)}`;
   const ID = 'metalcated-dashboard-companion';
+  const hiddenSecondary = 'data-metalcated-dashboard-companion-hidden';
   const nativeLayout = 'main, [class*="MainNav-header-"], [class*="MainNav-subNavWrapper-"], [class*="MainNav-root-"], [class*="MainNav-container-"], [class*="MainNav-logoWrapper-"]';
   if (document.getElementById(`${ID}-nav`)) return;
 
@@ -96,6 +97,10 @@
     node.inert = before.inert;
     if (before.attribute === null) node.removeAttribute('inert');
     else node.setAttribute('inert', before.attribute);
+    if (before.secondary) {
+      if (before.hiddenAttribute === null) node.removeAttribute(hiddenSecondary);
+      else node.setAttribute(hiddenSecondary, before.hiddenAttribute);
+    }
   }
 
   function isolateNativeContent(targets) {
@@ -105,8 +110,14 @@
       isolated.delete(node);
     }
     for (const node of targets) {
-      if (!isolated.has(node)) isolated.set(node, { inert: node.inert, attribute: node.getAttribute('inert') });
+      if (!isolated.has(node)) isolated.set(node, {
+        inert: node.inert, attribute: node.getAttribute('inert'),
+        secondary: node !== targets[0], hiddenAttribute: node.getAttribute(hiddenSecondary),
+      });
       node.inert = true;
+      // The secondary sidebar starts inside the rail's 16px gutter. Preserve
+      // its layout but suppress that exposed edge without touching host styles.
+      if (isolated.get(node).secondary) node.setAttribute(hiddenSecondary, 'true');
     }
   }
 
