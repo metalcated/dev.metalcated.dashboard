@@ -16,6 +16,8 @@ The dashboard is static files in `assets/web/`, which Homey serves at `/app/dev.
 
 The embedded connection stays in memory. A separate approved screen stores an opaque, revocable dashboard connection in IndexedDB; the owner's Homey credential is never sent to that screen. Native screen identities are also stored in IndexedDB, separately for each Homey. Layouts remain stored in Homey, so mobile and web edits use the same dashboard objects.
 
+When Homey's app settings are opened from a local Homey address, the workspace reuses that working address, including its protocol and port. This also supports self-hosted servers on networks where Homey's generated secure hostname cannot be resolved.
+
 **Reload** reconnects the embedded view, **Expand** fills the screen when supported, and **Open separately** opens the standalone view. Hidden embedded views pause their update polling and live camera streams. The advanced manual-key form remains under **Connection & screens → Advanced connection settings**.
 
 **Use an API key** on the pairing screen is the optional legacy path for a deliberately supplied personal key. New connections are stored in IndexedDB; existing saved configurations are read and migrated without deleting their original record.

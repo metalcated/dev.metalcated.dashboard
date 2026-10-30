@@ -146,7 +146,7 @@
           if (err) return workspace.showError(err.message || String(err));
           workspace.setAddress(value);
           dashboardUrl = workspace.address();
-          document.getElementById('dashboard-url').textContent = value || 'Restart the app to show the address.';
+          document.getElementById('dashboard-url').textContent = dashboardUrl || 'Restart the app to show the address.';
           openButton.disabled = !dashboardUrl;
           copyButton.disabled = !dashboardUrl;
         });

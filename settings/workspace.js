@@ -13,6 +13,19 @@ function createDashboardWorkspace(Homey) {
     return a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31)
       || (a === 169 && b === 254);
   }
+  function workingSettingsOrigin() {
+    try {
+      const current = new URL(window.location.href);
+      const settingsPath = `/app/${appId}/settings`;
+      if (!['http:', 'https:'].includes(current.protocol) || current.username || current.password
+          || !isHomeyHost(current.hostname)
+          || ![settingsPath, `${settingsPath}/`, `${settingsPath}/index.html`].includes(current.pathname)) return null;
+      // This app's settings already loaded from this Homey origin. Reuse its working protocol, host and port rather
+      // than introducing a generated hostname that the browser's DNS may not resolve. Cloud-hosted settings do not
+      // qualify, so this never downgrades a cloud HTTPS view to a separate plain-HTTP LAN destination.
+      return current.origin;
+    } catch { return null; }
+  }
   const frame = document.getElementById('workspace-frame');
   const status = document.getElementById('workspace-status');
   const tabs = ['dashboard', 'connection'].map((name) => document.getElementById(`${name}-tab`));
@@ -180,7 +193,8 @@ function createDashboardWorkspace(Homey) {
         const url = new URL(value);
         if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash
           || !isHomeyHost(url.hostname) || url.pathname !== `/app/${appId}/assets/web/index.html`) throw new Error('Invalid address');
-        address = url.href;
+        const origin = workingSettingsOrigin();
+        address = origin ? new URL(url.pathname, origin).href : url.href;
       } catch {
         showStatus('The dashboard address is unavailable. Restart the app, then reopen this view.', true);
         return;

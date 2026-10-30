@@ -12,7 +12,7 @@ const ORIGIN = new URL(ADDRESS).origin;
 
 // A small app-view host: tests run the actual controller and observe its security boundary, asynchronous connection
 // callbacks, and visibility events. It intentionally has no browser storage or real network implementation.
-function workspace() {
+function workspace({ settingsUrl = 'https://my.homey.app/' } = {}) {
   const timers = new Map();
   const calls = [];
   const sent = [];
@@ -66,6 +66,7 @@ function workspace() {
   document.visibilityState = 'visible';
   document.getElementById = node;
   const window = new Target();
+  window.location = new URL(settingsUrl);
   const Homey = {
     api(method, route, body, callback) { calls.push({ method, route, body, callback }); },
     openURL(url) { opened.push(url); },
@@ -226,4 +227,49 @@ test('separate-screen opening uses a clean dashboard address rather than an embe
   host.controller.setAddress(ADDRESS);
   host.node('workspace-open').emit('click');
   assert.deepEqual(host.opened, [ADDRESS]);
+});
+
+test('a working LAN app-settings origin avoids the generated DNS name and keeps connection delivery exact', () => {
+  const origin = 'http://192.168.80.87:4859';
+  const host = workspace({ settingsUrl: `${origin}/app/dev.schweiger.dashboard/settings/` });
+  host.controller.setAddress('https://192-168-80-87.homey.homeylocal.com:4860/app/dev.schweiger.dashboard/assets/web/index.html');
+  assert.equal(host.controller.address(), `${origin}/app/dev.schweiger.dashboard/assets/web/index.html`);
+  assert.equal(host.frame.src, `${host.controller.address()}?embedded=1`);
+  host.ready(); // The failed generated hostname is no longer an accepted sender.
+  assert.equal(host.calls.length, 0);
+  host.ready({ origin });
+  assert.equal(host.calls.length, 1);
+  host.calls[0].callback(null, approved);
+  assert.equal(connections(host)[0].origin, origin);
+  assert.equal(connections(host)[0].message.config.homeyUrl, origin);
+  assert.ok(!host.frame.src.includes(approved.token));
+  host.node('workspace-open').emit('click');
+  assert.deepEqual(host.opened, [host.controller.address()]);
+});
+
+test('reusing an already loaded HTTPS Homey settings origin preserves HTTPS and its actual port', () => {
+  const origin = 'https://192-168-80-87.homey.homeylocal.com:4443';
+  const host = workspace({ settingsUrl: `${origin}/app/dev.schweiger.dashboard/settings/index.html` });
+  host.controller.setAddress('http://192.168.80.87:4859/app/dev.schweiger.dashboard/assets/web/index.html');
+  assert.equal(new URL(host.controller.address()).origin, origin);
+  assert.equal(new URL(host.frame.src).protocol, 'https:');
+});
+
+test('cloud settings and unrelated/private-origin pages cannot change the validated dashboard destination', () => {
+  for (const settingsUrl of [
+    'https://my.homey.app/app/dev.schweiger.dashboard/settings/',
+    'https://attacker.example/app/dev.schweiger.dashboard/settings/',
+    'http://192.168.80.87:4859/app/another.app/settings/',
+    'http://192.168.80.87:4859/app/dev.schweiger.dashboard/assets/web/index.html',
+    'http://192.168.80.87:4859/app/dev.schweiger.dashboard/settings-untrusted/',
+  ]) {
+    const host = workspace({ settingsUrl });
+    host.controller.setAddress(ADDRESS);
+    assert.equal(host.controller.address(), ADDRESS, settingsUrl);
+    assert.equal(new URL(host.frame.src).protocol, 'https:', settingsUrl);
+  }
+  const host = workspace({ settingsUrl: 'http://192.168.80.87:4859/app/dev.schweiger.dashboard/settings/' });
+  host.controller.setAddress('https://attacker.example/app/dev.schweiger.dashboard/assets/web/index.html');
+  assert.equal(host.controller.address(), null, 'the source address must still pass the original destination checks');
+  assert.equal(host.frame.hasAttribute('src'), false);
 });
