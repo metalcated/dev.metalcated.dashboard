@@ -173,6 +173,9 @@ function createDashboardWorkspace(Homey) {
     showStatus('Opening your dashboards…');
     const url = new URL(address);
     url.searchParams.set('embedded', '1');
+    // A fragment change alone is a same-document navigation. Rotate a noncredential visit counter in the query so
+    // Reload actually creates a fresh document and MessageChannel; keep the private challenge in the fragment.
+    url.searchParams.set('visit', String(attempt));
     bridgeNonce = Array.from(window.crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
     // This per-visit handshake value is not an API credential. The fragment stays out of HTTP requests/referrers.
     url.hash = `bridge=${bridgeNonce}`;

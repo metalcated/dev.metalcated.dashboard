@@ -130,7 +130,8 @@ test('only the expected dashboard frame and exact origin can request automatic c
   assert.equal(sent.message.config.token, 'embedded-channel');
   assert.equal(sent.message.config.screenId, approved.screenId);
   assert.equal(sent.message.config.homeyUrl, ORIGIN);
-  assert.equal(new URL(host.frame.src).search, '?embedded=1');
+  assert.equal(new URL(host.frame.src).searchParams.get('embedded'), '1');
+  assert.match(new URL(host.frame.src).searchParams.get('visit'), /^\d+$/);
   assert.ok(!host.frame.src.includes(approved.token), 'credentials must never enter a URL');
   assert.equal(host.node('workspace-status').hidden, true);
 });
@@ -246,7 +247,8 @@ test('a working LAN app-settings origin avoids the generated DNS name and keeps 
   const host = workspace({ settingsUrl: `${origin}/app/dev.schweiger.dashboard/settings/` });
   host.controller.setAddress('https://192-168-80-87.homey.homeylocal.com:4860/app/dev.schweiger.dashboard/assets/web/index.html');
   assert.equal(host.controller.address(), `${origin}/app/dev.schweiger.dashboard/assets/web/index.html`);
-  assert.equal(host.frame.src.split('#')[0], `${host.controller.address()}?embedded=1`);
+  assert.equal(new URL(host.frame.src).origin, origin);
+  assert.equal(new URL(host.frame.src).searchParams.get('embedded'), '1');
   host.ready(); // The failed generated hostname is no longer an accepted sender.
   assert.equal(host.calls.length, 0);
   host.ready({ origin });
@@ -356,11 +358,13 @@ test('reload closes the old port, changes its nonce, and ignores old request rep
   const first = openChannel(host);
   host.calls[0].callback(null, approved);
   const oldNonce = new URL(host.frame.src).hash;
+  const oldDocumentUrl = host.frame.src.split('#')[0];
   first.emit({ type: 'dashboard:request', id: 1, route: 'request', body: { method: 'GET', path: '/api/manager/dashboards/dashboard' } });
   const oldRequest = host.calls[1];
   host.node('workspace-reload').emit('click');
   assert.equal(first.closed, true);
   assert.notEqual(new URL(host.frame.src).hash, oldNonce);
+  assert.notEqual(host.frame.src.split('#')[0], oldDocumentUrl, 'Reload must navigate beyond the fragment to recreate the document');
   oldRequest.callback(null, { stale: true });
   assert.equal(first.sent.some((message) => message.type === 'dashboard:response'), false);
   const second = openChannel(host);

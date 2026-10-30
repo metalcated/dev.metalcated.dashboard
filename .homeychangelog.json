@@ -37,5 +37,8 @@
   },
   "1.4.6": {
     "en": "Native dashboard connections can use a dedicated scoped key held only on Homey when firmware restricts the built-in app credential. Connection status checks the actual dashboard grant; a rejected configured key never silently falls back to another credential."
+  },
+  "1.4.7": {
+    "en": "Reload creates a new embedded page and private connection instead of changing only its fragment, so a failed connection can start again correctly."
   }
 }
