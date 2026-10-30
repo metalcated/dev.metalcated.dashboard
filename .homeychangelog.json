@@ -52,5 +52,8 @@
   },
   "1.5.2": {
     "en": "Camera connection requests have a dedicated startup window so cold cameras are not cut off by the shorter ordinary-control limit. The embedded Homey view uses matching bounded deadlines and reports camera timeouts accurately. Other request limits, permissions and playback preferences stay the same."
+  },
+  "1.5.3": {
+    "en": "Live camera widgets expose Auto start stream in the browser dashboard editor. Changes save to the same native Homey widget setting used by the mobile app; existing playback choices and defaults are preserved."
   }
 }

@@ -468,7 +468,16 @@ export async function openWidgetSettings(dashboardId, widget, name) {
       preview.append(image);
       root.append(preview);
     }
-    renderTitleRows(section(root, 'Settings'));
+    const settings = section(root, 'Settings');
+    renderTitleRows(settings);
+    if (widget.type === 'device_camera_live') {
+      switchRow(settings, 'Auto start stream', dataValue('autoplay') !== false, (on) => {
+        // An omitted value starts automatically too. Returning to the original
+        // choice leaves that native default untouched when another field saves.
+        if (on === (widget.data?.autoplay !== false)) delete draft.data.autoplay;
+        else draft.data.autoplay = on;
+      });
+    }
     if (isApp && definition == null) {
       hint(root, "The app for this widget isn't running, so its own settings can't be changed now.");
     } else if (widget.type in TITLE_ONLY) {
@@ -1004,7 +1013,7 @@ export async function openWidgetSettings(dashboardId, widget, name) {
       if (titleChanged || changed.length > 0 || picksChanged || dataChanged.length > 0) {
         await updateDashboard(dashboardId, (columns) => {
           const target = locateWidget(columns, widget.id).widget;
-          target.titleHidden = draft.titleHidden;
+          if (draft.titleHidden !== (widget.titleHidden === true)) target.titleHidden = draft.titleHidden;
           if (title !== (widget.title ?? '')) {
             // Cleared, it goes back to the name it gets by itself.
             target.title = title || (definition?.name ?? null);
