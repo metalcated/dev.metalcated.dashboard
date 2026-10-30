@@ -24,6 +24,7 @@ function browser({ url = `${ORIGIN}${PREFIX}/devices`, navigation = true } = {})
   const observers = [];
   const posted = [];
   const forbidden = [];
+  const focused = [];
 
   class Target {
     constructor() { this.listeners = new Map(); }
@@ -86,7 +87,6 @@ function browser({ url = `${ORIGIN}${PREFIX}/devices`, navigation = true } = {})
       this.attributes = new Map();
       this.parentElement = null;
       this.hidden = false;
-      this.inert = false;
       this.style = { setProperty(name, value) { this[name] = String(value); }, removeProperty(name) { delete this[name]; }, getPropertyValue(name) { return this[name] ?? ''; } };
       this.dataset = {};
       this._text = '';
@@ -104,6 +104,8 @@ function browser({ url = `${ORIGIN}${PREFIX}/devices`, navigation = true } = {})
     }
     get id() { return this.getAttribute('id') ?? ''; }
     set id(value) { this.setAttribute('id', value); }
+    get inert() { return this.hasAttribute('inert'); }
+    set inert(value) { if (value) this.setAttribute('inert', ''); else this.removeAttribute('inert'); }
     get className() { return this.getAttribute('class') ?? ''; }
     set className(value) { this.setAttribute('class', value); }
     get href() { return new URL(this.getAttribute('href') ?? '', window.location.href).href; }
@@ -156,7 +158,11 @@ function browser({ url = `${ORIGIN}${PREFIX}/devices`, navigation = true } = {})
       return copy;
     }
     getBoundingClientRect() { return this.rect ?? { left: 16, right: 88, top: 104, bottom: 1057, width: 72, height: 953 }; }
-    focus() { document.activeElement = this; }
+    focus() {
+      const blocked = Boolean(this.closest('[inert]'));
+      focused.push({ node: this, blocked });
+      if (!blocked) document.activeElement = this;
+    }
     click(details = {}) {
       const event = { type: 'click', target: this, defaultPrevented: false, button: 0,
         preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, stopImmediatePropagation() {}, ...details };
@@ -216,7 +222,25 @@ function browser({ url = `${ORIGIN}${PREFIX}/devices`, navigation = true } = {})
   const container = new Element();
   container.className = 'MainNav-container-040f2';
   container.rect = { left: 16, right: 368, width: 352 };
-  document.body.append(container);
+  container.style.zIndex = '200';
+  const layout = new Element();
+  const navRoot = new Element(); navRoot.className = 'MainNav-root-540d8';
+  const logo = new Element(); logo.className = 'MainNav-logoWrapper-c6716';
+  const logoLink = new Element('a'); logoLink.href = '/web/homeys'; logo.append(logoLink);
+  let secondaryHeader = new Element('header'); secondaryHeader.className = 'MainNav-header-77f48';
+  let secondarySidebar = new Element(); secondarySidebar.className = 'MainNav-subNavWrapper-98759';
+  container.append(logo, secondaryHeader, secondarySidebar);
+  navRoot.append(container);
+  const makeMain = () => {
+    const main = new Element('main'); main.style.zIndex = '100';
+    const header = new Element('header'); header.style.zIndex = '400';
+    const control = new Element('button'); control.textContent = 'Native device';
+    main.append(header, control);
+    return main;
+  };
+  let main = makeMain();
+  layout.append(navRoot, main);
+  document.body.append(layout);
   const makeNav = () => {
     const nav = new Element('nav');
     nav.className = 'MainNav-navLinkItems-59ad8';
@@ -233,15 +257,18 @@ function browser({ url = `${ORIGIN}${PREFIX}/devices`, navigation = true } = {})
       const label = new Element('span'); label.className = 'MainNavItem-label-0c6d6'; label.textContent = name;
       link.append(icon, label); nav.append(link);
     }
-    container.append(nav);
+    container.insertBefore(nav, secondaryHeader);
     return nav;
   };
   let nav = navigation ? makeNav() : null;
   vm.createContext(context);
   return {
-    document, window, context, posted, forbidden, Element, container,
+    document, window, context, posted, forbidden, focused, Element, container, navRoot, logo, logoLink,
     node: (id) => document.getElementById(id),
     get nav() { return nav; },
+    get main() { return main; },
+    get secondaryHeader() { return secondaryHeader; },
+    get secondarySidebar() { return secondarySidebar; },
     native: (name) => nav?.querySelector(`[aria-label="${name}"]`),
     settle() {
       for (let count = 0; frames.size; count++) {
@@ -254,6 +281,19 @@ function browser({ url = `${ORIGIN}${PREFIX}/devices`, navigation = true } = {})
       this.settle();
     },
     replaceNavigation() { nav?.remove(); nav = makeNav(); this.notify([{ type: 'childList', target: container, addedNodes: [nav], removedNodes: [] }]); },
+    replaceMain() {
+      const old = main; main = makeMain(); layout.insertBefore(main, old); old.remove();
+      this.notify([{ type: 'childList', target: layout, addedNodes: [main], removedNodes: [old] }]);
+      return old;
+    },
+    replaceSecondary() {
+      const old = [secondaryHeader, secondarySidebar];
+      secondaryHeader = new Element('header'); secondaryHeader.className = 'MainNav-header-77f48';
+      secondarySidebar = new Element(); secondarySidebar.className = 'MainNav-subNavWrapper-98759';
+      container.append(secondaryHeader, secondarySidebar); for (const node of old) node.remove();
+      this.notify([{ type: 'childList', target: container, addedNodes: [secondaryHeader, secondarySidebar], removedNodes: old }]);
+      return old;
+    },
     navigate(next) { window.location.href = new URL(next, window.location.href).href; for (const callback of intervals.values()) callback(); this.settle(); },
     load() {
       const source = fs.readFileSync(path.join(__dirname, '../companion/content.js'), 'utf8');
@@ -292,10 +332,11 @@ test('invalid configuration and nested frames cannot add a navigation entry', ()
 
 test('an unknown Homey layout is left alone until the real main navigation appears', () => {
   const host = browser({ navigation: false });
+  const original = [...host.container.children];
   host.load();
   assert.equal(host.node(NAV_ID), null);
   assert.equal(host.node(PANEL_ID), null);
-  assert.equal(host.container.children.length, 0);
+  assert.deepEqual(host.container.children, original);
   host.replaceNavigation();
   assert.ok(host.node(NAV_ID));
   assert.equal(host.document.querySelectorAll(`#${NAV_ID}`).length, 1);
@@ -343,6 +384,103 @@ test('modified and middle clicks retain the clean standalone address and native 
     assert.ok(!host.node(PANEL_ID) || host.node(PANEL_ID).hidden);
   }
   assert.equal(new URL(link.href).search, '');
+  assert.deepEqual(host.forbidden, []);
+});
+
+test('the panel paints above both native layers and its own rail label stays on one line', () => {
+  const host = browser();
+  host.load(); host.node(NAV_ID).click(); host.settle();
+  const css = fs.readFileSync(path.join(__dirname, '../companion/content.css'), 'utf8');
+  const panelRules = /\.mdc-panel\s*\{([\s\S]*?)\}/.exec(css)?.[1] ?? '';
+  const zIndex = Number(/z-index:\s*(\d+)/.exec(panelRules)?.[1]);
+  assert.ok(zIndex > Number(host.main.style.zIndex), 'the nested native header stays inside MAIN z100');
+  assert.ok(zIndex > Number(host.container.style.zIndex), 'the secondary sidebar shares the navigation z200');
+  assert.ok(host.node(NAV_ID).querySelector('.mdc-nav-label'));
+  assert.match(css, /\.mdc-nav-entry\s+\.mdc-nav-label\s*\{[^}]*white-space:\s*nowrap;/);
+  assert.equal(host.node(PANEL_ID).style.getPropertyValue('--mdc-left'), '104px', 'the higher panel still leaves the primary rail accessible');
+});
+
+test('covered content is inert while open and exact prior inert state is restored before native focus', () => {
+  const host = browser();
+  host.secondaryHeader.setAttribute('inert', 'native-header-state');
+  host.secondarySidebar.inert = true;
+  const control = host.main.children[1]; control.focus();
+  host.load(); host.node(NAV_ID).click(); host.settle();
+  for (const node of [host.main, host.secondaryHeader, host.secondarySidebar]) assert.equal(node.inert, true);
+  for (const node of [host.nav, host.logo, host.container, host.navRoot]) assert.equal(node.inert, false, 'the primary rail, logo and their ancestors stay usable');
+  const back = host.document.activeElement;
+  control.focus();
+  assert.equal(host.document.activeElement, back, 'keyboard focus cannot move to a covered native device');
+  assert.equal(host.focused.at(-1).blocked, true);
+  host.document.emit('keydown', { key: 'Escape' });
+  assert.equal(host.main.inert, false);
+  assert.equal(host.main.getAttribute('inert'), null);
+  assert.equal(host.secondaryHeader.getAttribute('inert'), 'native-header-state');
+  assert.equal(host.secondarySidebar.getAttribute('inert'), '');
+  assert.equal(host.document.activeElement, control);
+  assert.equal(host.focused.at(-1).blocked, false, 'restoration must precede the focus call');
+  assert.deepEqual(host.forbidden, []);
+});
+
+test('replacement main and secondary sidebar at the same route inherit isolation without disabling the rail', () => {
+  const host = browser();
+  host.secondaryHeader.setAttribute('inert', 'preexisting');
+  host.load(); host.node(NAV_ID).click(); host.settle();
+  const oldMain = host.replaceMain();
+  const oldSecondary = host.replaceSecondary();
+  assert.equal(host.node(PANEL_ID).hidden, false);
+  assert.equal(oldMain.inert, false, 'detached content returns to its original state');
+  assert.equal(oldSecondary[0].getAttribute('inert'), 'preexisting');
+  assert.equal(oldSecondary[1].inert, false);
+  for (const node of [host.main, host.secondaryHeader, host.secondarySidebar]) assert.equal(node.inert, true);
+  assert.equal(host.nav.inert, false); assert.equal(host.logo.inert, false);
+  assert.equal(host.native('Flows').click().defaultPrevented, false);
+  for (const node of [host.main, host.secondaryHeader, host.secondarySidebar]) assert.equal(node.inert, false);
+  assert.equal(host.node(PANEL_ID).hidden, true);
+  assert.deepEqual(host.forbidden, []);
+});
+
+test('every route and page-cache teardown restores covered controls, including previously inert content', () => {
+  for (const teardown of [
+    (host) => host.navigate(`${PREFIX}/flows`),
+    (host) => host.navigate('/web/homeys/another-homey/devices'),
+    (host) => host.replaceNavigation(),
+    (host) => host.window.emit('popstate'),
+    (host) => host.window.emit('pagehide', { persisted: true }),
+  ]) {
+    const host = browser();
+    host.secondarySidebar.setAttribute('inert', 'retained-native-state');
+    host.load(); host.node(NAV_ID).click(); host.settle();
+    teardown(host); host.settle();
+    assert.equal(host.main.inert, false);
+    assert.equal(host.secondaryHeader.inert, false);
+    assert.equal(host.secondarySidebar.getAttribute('inert'), 'retained-native-state');
+    assert.equal(host.nav.inert, false); assert.equal(host.logo.inert, false);
+    assert.deepEqual(host.forbidden, []);
+  }
+});
+
+test('unfamiliar layout boundaries keep the standalone link and never disable native controls', () => {
+  for (const change of [
+    (host) => { host.navRoot.className = 'ChangedVendorContainer'; },
+    (host) => host.logo.remove(),
+    (host) => host.container.append(new host.Element()),
+    (host) => host.main.remove(),
+  ]) {
+    const host = browser(); host.load(); change(host);
+    assert.equal(host.node(NAV_ID).click().defaultPrevented, false);
+    assert.equal(host.node(PANEL_ID), null);
+    for (const node of [host.main, host.secondaryHeader, host.secondarySidebar, host.nav, host.logo, host.container, host.navRoot]) assert.equal(node.inert, false);
+    assert.deepEqual(host.forbidden, []);
+  }
+});
+
+test('an unfamiliar replacement while open retires the overlay and restores the vendor interface', () => {
+  const host = browser(); host.load(); host.node(NAV_ID).click(); host.settle();
+  const unknown = new host.Element(); host.container.append(unknown);
+  host.notify([{ type: 'childList', target: host.container, addedNodes: [unknown], removedNodes: [] }]);
+  assert.equal(host.node(PANEL_ID).hidden, true);
+  for (const node of [host.main, host.secondaryHeader, host.secondarySidebar, host.nav, host.logo, unknown]) assert.equal(node.inert, false);
   assert.deepEqual(host.forbidden, []);
 });
 

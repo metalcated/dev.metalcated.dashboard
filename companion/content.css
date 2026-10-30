@@ -6,6 +6,13 @@
   fill: currentColor;
 }
 .mdc-nav-entry:focus-visible { outline: 2px solid #007aff; outline-offset: 3px; }
+.mdc-nav-entry .mdc-nav-label {
+  display: block;
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
 .mdc-panel {
   --mdc-left: 104px;
   --mdc-fallback-bg: #f4f4fb;
@@ -19,7 +26,8 @@
   --mdc-muted: var(--theme-color-mono-600, var(--mdc-fallback-muted));
   --mdc-border: var(--theme-color-mono-100, var(--mdc-fallback-border));
   position: fixed;
-  z-index: 90;
+  /* Homey's MAIN is z100 and its navigation container is z200. */
+  z-index: 300;
   inset: 0 0 0 var(--mdc-left);
   display: flex;
   flex-direction: column;

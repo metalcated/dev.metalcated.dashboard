@@ -20,6 +20,7 @@
   const frameUrl = `${cleanUrl}?shell=1`;
   const settingsUrl = `${origin}${prefix}/settings/apps/${encodeURIComponent(config.appId)}`;
   const ID = 'metalcated-dashboard-companion';
+  const nativeLayout = 'main, [class*="MainNav-header-"], [class*="MainNav-subNavWrapper-"], [class*="MainNav-root-"], [class*="MainNav-container-"], [class*="MainNav-logoWrapper-"]';
   if (document.getElementById(`${ID}-nav`)) return;
 
   let nav = null;
@@ -33,6 +34,7 @@
   let lastUrl = location.href;
   let scheduled = false;
   let stopped = false;
+  const isolated = new Map();
 
   const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(() => schedule()) : null;
 
@@ -71,12 +73,56 @@
     else entry.removeAttribute('aria-current');
   }
 
+  function coveredNativeContent() {
+    const container = nav?.parentElement;
+    const root = container?.parentElement;
+    // These are the observed sibling boundaries. Never disable the whole
+    // navigation container: it also owns the primary rail and Homey logo.
+    if (!nav?.matches('nav[class*="MainNav-navLinkItems-"]')
+      || !container?.matches('div[class*="MainNav-container-"]')
+      || !root?.matches('[class*="MainNav-root-"]')) return null;
+    const children = [...container.children];
+    const logos = children.filter((node) => node.matches('div[class*="MainNav-logoWrapper-"]'));
+    const secondary = children.filter((node) => node.matches('header[class*="MainNav-header-"], div[class*="MainNav-subNavWrapper-"]'));
+    const mains = [...(root.parentElement?.children ?? [])].filter((node) => node.tagName === 'MAIN');
+    if (logos.length !== 1 || mains.length !== 1
+      || children.some((node) => node !== nav && node !== logos[0] && !secondary.includes(node))) return null;
+    const targets = [mains[0], ...secondary];
+    if (targets.some((node) => node.contains(nav) || node.contains(logos[0]) || node.contains(panel))) return null;
+    return targets;
+  }
+
+  function restoreNativeContent(node, before) {
+    node.inert = before.inert;
+    if (before.attribute === null) node.removeAttribute('inert');
+    else node.setAttribute('inert', before.attribute);
+  }
+
+  function isolateNativeContent(targets) {
+    for (const [node, before] of isolated) {
+      if (targets.includes(node)) continue;
+      restoreNativeContent(node, before);
+      isolated.delete(node);
+    }
+    for (const node of targets) {
+      if (!isolated.has(node)) isolated.set(node, { inert: node.inert, attribute: node.getAttribute('inert') });
+      node.inert = true;
+    }
+  }
+
+  function restoreAllNativeContent() {
+    for (const [node, before] of isolated) restoreNativeContent(node, before);
+    isolated.clear();
+  }
+
   function close({ focus = true } = {}) {
     if (!opened) return;
     opened = false;
     if (panel) panel.hidden = true;
     visibility();
     setEntryActive(false);
+    // Restore keyboard/click access before focus returns to native content.
+    restoreAllNativeContent();
     // Native navigation remains authoritative after a route change. For a
     // simple close, put back only attributes that this companion suppressed.
     if (location.href === openedAt) {
@@ -161,9 +207,11 @@
   }
 
   function open() {
-    if (!allowed() || !nav?.isConnected || !entry?.isConnected) return;
+    if (!allowed() || !nav?.isConnected || !entry?.isConnected) return false;
+    const targets = coveredNativeContent();
+    if (!targets) return false;
     if (!panel) createPanel();
-    if (opened) return;
+    if (opened) return true;
     opened = true;
     openedAt = location.href;
     previousFocus = document.activeElement;
@@ -176,10 +224,12 @@
       item.node.removeAttribute('aria-current');
     }
     setEntryActive(true);
+    isolateNativeContent(targets);
     panel.hidden = false;
     position();
     visibility();
     panel.querySelector('.mdc-back')?.focus({ preventScroll: true });
+    return true;
   }
 
   function unmount() {
@@ -199,7 +249,15 @@
     lastUrl = location.href;
     if (!allowed()) { unmount(); return; }
     if (changed) close({ focus: false });
-    if (entry?.isConnected && nav?.isConnected) { position(); return; }
+    if (entry?.isConnected && nav?.isConnected) {
+      if (opened) {
+        const targets = coveredNativeContent();
+        if (targets) isolateNativeContent(targets);
+        else close({ focus: false });
+      }
+      position();
+      return;
+    }
     if (nav || entry) unmount();
     const devices = [...document.querySelectorAll('nav a[href]')].find((anchor) => {
       const url = urlOf(anchor);
@@ -228,13 +286,14 @@
     const wrapper = entry.querySelector('[class*="MainNavItem-iconWrapper"]');
     if (!label || !wrapper) { entry = null; nav = null; return; }
     label.textContent = 'Dashboards';
+    label.classList.add('mdc-nav-label');
     wrapper.replaceChildren(svg());
     setEntryActive(false);
     entry.addEventListener('click', (event) => {
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.defaultPrevented) return;
+      if (!open()) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      open();
     }, { capture: true });
     nav.insertBefore(entry, home ? home.nextSibling : devices);
     resize?.observe(nav);
@@ -257,8 +316,11 @@
     if (layoutChanges.some((record) => {
       if (panel?.contains(record.target) || entry?.contains(record.target)) return false;
       if (record.target.closest?.('nav')) return true;
+      if (opened && [nav?.parentElement, nav?.parentElement?.parentElement,
+        nav?.parentElement?.parentElement?.parentElement].includes(record.target)) return true;
       return [...record.addedNodes, ...record.removedNodes].some((node) => node.nodeType === 1
-        && (node.matches?.('nav') || node.querySelector?.('nav')));
+        && (node.matches?.('nav') || node.querySelector?.('nav')
+          || (opened && (node.matches?.(nativeLayout) || node.querySelector?.(nativeLayout)))));
     })) schedule();
   });
   observer.observe(document.body, { childList: true, subtree: true });
