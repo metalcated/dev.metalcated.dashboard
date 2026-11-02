@@ -1,4 +1,7 @@
 {
+  "1.7.1": {
+    "en": "Keep live subscriptions separate for each open dashboard view, so multiple tabs in the same browser can update sensors and charts without repeatedly rebuilding the dashboard. Existing browser connections and native mobile dashboards are preserved."
+  },
   "1.7.0": {
     "en": "Arrange widgets with mouse, touch or keyboard and snap them into native columns. Resize web widgets from a corner with sizes saved on Homey and shared across browsers; native speaker, timeline and web-frame size controls remain available separately. Remove columns after confirming where their widgets should move. Layout edits and size updates preserve running widget and camera content."
   },

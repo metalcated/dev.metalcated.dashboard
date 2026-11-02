@@ -170,10 +170,12 @@ test('coupled parent and child bound concurrent controls and recover after their
   await drain();
   assert.equal(parent.calls.length, 33);
 
-  const resumed = client.broker('events', { subscriptions: [] });
+  const pollerId = 'a'.repeat(32);
+  const resumed = client.broker('events', { pollerId, subscriptions: [] });
   await drain();
   assert.equal(parent.calls.length, 34);
   assert.equal(parent.calls.at(-1).route, '/workspace/events');
+  assert.equal(parent.calls.at(-1).body.pollerId, pollerId, 'the private settings channel retains the active view identity');
   parent.calls.at(-1).callback(null, { cursor: 'epoch:1', events: [] });
   assert.deepEqual(structuredClone(await resumed), { cursor: 'epoch:1', events: [] });
   const childRequests = view.channels[0].port1.messages.filter((message) => message.type === 'dashboard:request');

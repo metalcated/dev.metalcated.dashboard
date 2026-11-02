@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
 
 async function load(name, globals = {}, imports = {}) {
   if (name === 'homey-api.js' && !imports['./embedded.js']) {
@@ -443,6 +444,7 @@ async function relayHarness(broker) {
   const statuses = [];
   const callbacks = { reconnects: 0, unauthorized: 0 };
   const api = await load('realtime.js', {
+    crypto: webcrypto,
     setTimeout: (callback) => { const id = ++nextTimer; timers.set(id, callback); return id; },
     clearTimeout: (id) => timers.delete(id),
     window: {
@@ -485,14 +487,30 @@ test('broker realtime deduplicates subscriptions, dispatches matching events, an
   await relay.next();
   assert.equal(requests[0].route, 'events');
   assert.equal(requests[0].payload.subscriptions.length, 2);
+  assert.match(requests[0].payload.pollerId, /^[a-f0-9]{32}$/);
   assert.equal(requests[0].payload.cursor, undefined);
   firstOff();
   await relay.next();
   assert.equal(requests[1].payload.cursor, 'epoch:1');
+  assert.equal(requests[1].payload.pollerId, requests[0].payload.pollerId, 'the active view retains its identity across polls');
   assert.deepEqual(seen, [['second', 'office']]);
   assert.equal(relay.callbacks.reconnects, 1);
   relay.realtime.close();
   assert.equal(relay.timers.size, 0);
+});
+
+test('each live relay gets an independent in-memory view identity', async () => {
+  const views = [];
+  const first = await relayHarness(async (_route, payload) => { views.push(payload.pollerId); return { cursor: 'epoch:1' }; });
+  const second = await relayHarness(async (_route, payload) => { views.push(payload.pollerId); return { cursor: 'epoch:1' }; });
+  await first.next();
+  await second.next();
+  assert.equal(views.length, 2);
+  assert.match(views[0], /^[a-f0-9]{32}$/);
+  assert.match(views[1], /^[a-f0-9]{32}$/);
+  assert.notEqual(views[0], views[1]);
+  first.realtime.close();
+  second.realtime.close();
 });
 
 test('broker polling never overlaps, pauses while hidden, and aborts on pagehide', async () => {

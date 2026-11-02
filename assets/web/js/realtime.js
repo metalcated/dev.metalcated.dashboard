@@ -90,6 +90,9 @@ export function createRealtime(client, callbacks) {
 // authenticates a socket using the owner's API key.
 function createBrokerRealtime(client, { onStatus, onReconnect, onUnauthorized }) {
   const listeners = new Set();
+  // A browser connection is shared between tabs; the active view's subscription identity stays in memory.
+  // getRandomValues also works on Homey's plain-HTTP LAN address, unlike randomUUID.
+  const pollerId = [...crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   let cursor;
   let timer = null;
   let active = null;
@@ -110,7 +113,7 @@ function createBrokerRealtime(client, { onStatus, onReconnect, onUnauthorized })
     active = controller;
     const subscriptions = [...new Map([...listeners].map(({ uri, event }) => [JSON.stringify([uri, event]), { uri, event }])).values()];
     try {
-      const result = await client.broker('events', { subscriptions, ...(cursor == null ? {} : { cursor }) }, { signal: controller.signal });
+      const result = await client.broker('events', { pollerId, subscriptions, ...(cursor == null ? {} : { cursor }) }, { signal: controller.signal });
       if (closed || controller.signal.aborted) return;
       if (typeof result?.cursor === 'string') cursor = result.cursor;
       const resync = result?.reset === true || (connectedBefore && offline);

@@ -14,6 +14,7 @@ import { WIDGETS, widgetTypeName } from './widgets/index.js';
 // (highlight.js).
 const drawn = new Map();
 let drawnDashboardId = null;
+let drawnClient = null;
 let columnNodes = [];
 let columnIds = [];
 
@@ -35,6 +36,7 @@ function dropWidget(id) {
 function teardown() {
   for (const id of [...drawn.keys()]) dropWidget(id);
   drawnDashboardId = null;
+  drawnClient = null;
   columnNodes = [];
   columnIds = [];
 }
@@ -54,7 +56,7 @@ export function holdBoard(hold) {
 
 // The board's own section for a widget, if it is drawn with these settings.
 export function drawnWidget(dashboardId, widget) {
-  const entry = dashboardId === drawnDashboardId ? drawn.get(widget.id) : null;
+  const entry = state.client === drawnClient && dashboardId === drawnDashboardId ? drawn.get(widget.id) : null;
   return entry && sameJson(entry.widget, widget) ? entry.section : null;
 }
 
@@ -106,16 +108,25 @@ function drawWidget(dashboardId, widget, parent, before) {
 
 export async function renderDashboard() {
   const client = state.client;
-  if (held) {
+  const dashboard = client == null ? null : state.dashboards[state.dashboardId];
+  const keepMounted = client != null && client === drawnClient && dashboard?.id === drawnDashboardId;
+  if (held && keepMounted) {
     heldRender = true;
     return;
   }
   const renderId = ++renderCount;
-  teardown();
   const board = $('board');
-  board.replaceChildren();
+  // A slow resync must not temporarily unsubscribe every widget while the next event poll is running. Keep the
+  // current connection's board alive until its fresh data is ready; another connection never retains old content.
+  if (!keepMounted) {
+    teardown();
+    board.replaceChildren();
+  }
+  if (held) {
+    heldRender = true;
+    return;
+  }
 
-  const dashboard = state.dashboards[state.dashboardId];
   if (dashboard == null) {
     $('dashboard-name').textContent = 'Homey';
     note(board, 'No dashboards yet. Choose New dashboard to create your first one.');
@@ -131,10 +142,21 @@ export async function renderDashboard() {
   const needed = widgets.flatMap((widget) => WIDGETS[widget.type]?.needs ?? []);
   const { data, errors } = await loadData(needed);
   if (renderId !== renderCount || state.client !== client) return; // Superseded by a render or connection.
+  // A native edit can be reconciled in place while this read is pending. Never replace that newer layout with the
+  // earlier columns captured above; read the current board's requirements before completing its resync.
+  if (state.dashboards[state.dashboardId] !== dashboard) return renderDashboard();
+  if (held) {
+    heldRender = true;
+    return;
+  }
+  // Tear down and replace synchronously, leaving no polling opportunity with an empty subscription list.
+  teardown();
+  board.replaceChildren();
   state.data = data;
   state.dataErrors = errors;
 
   drawnDashboardId = dashboard.id;
+  drawnClient = client;
   for (const column of columns) {
     const columnNode = el('div', 'column');
     board.append(columnNode);
@@ -154,7 +176,7 @@ export function updateBoard() {
   const widgets = columns.flatMap((column) => column.widgets);
   const unloaded = widgets.flatMap((widget) => WIDGETS[widget.type]?.needs ?? [])
     .some((key) => state.data[key] == null && state.dataErrors[key] == null);
-  if (held || dashboard == null || dashboard.id !== drawnDashboardId || unloaded) {
+  if (held || dashboard == null || state.client !== drawnClient || dashboard.id !== drawnDashboardId || unloaded) {
     renderDashboard();
     return;
   }

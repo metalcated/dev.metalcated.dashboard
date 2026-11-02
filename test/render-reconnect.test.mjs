@@ -157,7 +157,7 @@ class RenderElement {
   }
 }
 
-async function authoringRender() {
+async function authoringRender({ loadData = async () => ({ data: {}, errors: {} }) } = {}) {
   const board = new RenderElement('main');
   const title = new RenderElement('span');
   const document = {};
@@ -168,15 +168,17 @@ async function authoringRender() {
     data: {}, dataErrors: {}, highlighted: null };
   const mounts = [];
   const cleanups = [];
+  const subscriptions = new Set();
   const sizes = new Map();
   const sizeApplications = [];
   const widget = (type) => ({ title: type, mount({ body, widget: item }) {
     mounts.push(item.id);
+    subscriptions.add(item.id);
     if (type === 'camera') body.append(new RenderElement('video'));
-    return () => cleanups.push(item.id);
+    return () => { cleanups.push(item.id); subscriptions.delete(item.id); };
   } });
   const render = await moduleUnderTest('render.js', { document }, {
-    './data.js': { loadData: async () => ({ data: {}, errors: {} }) },
+    './data.js': { loadData },
     './dom.js': { $: (id) => id === 'board' ? board : title,
       el: (...args) => new RenderElement(...args), note: () => {} },
     './edit-mode.js': {
@@ -207,8 +209,129 @@ async function authoringRender() {
     } },
     './widgets/index.js': { WIDGETS: { note: widget('note'), camera: widget('camera') }, widgetTypeName: (type) => type },
   }, '\nexport { arrange };');
-  return { render, board, state, mounts, cleanups, sizes, sizeApplications };
+  return { render, board, state, mounts, cleanups, subscriptions, sizes, sizeApplications };
 }
+
+test('a same-connection resync keeps widgets and live subscriptions mounted throughout a delayed read', async () => {
+  const pending = deferred();
+  let reads = 0;
+  const view = await authoringRender({ loadData: () => ++reads === 1 ? { data: {}, errors: {} } : pending.promise });
+  await view.render.renderDashboard();
+  const column = view.board.children[0];
+  const camera = column.children[1];
+  const video = camera.querySelector('video');
+  const rendering = view.render.renderDashboard();
+  await new Promise(setImmediate);
+  assert.equal(view.board.children[0], column, 'the last good board stays visible while fetching current values');
+  assert.equal(column.children[1], camera);
+  assert.equal(camera.querySelector('video'), video);
+  assert.deepEqual(view.cleanups, []);
+  assert.deepEqual([...view.subscriptions], ['note-a', 'camera-b'], 'polls retain continuous topic coverage during a slow read');
+  pending.resolve({ data: { devices: { refreshed: true } }, errors: {} });
+  await rendering;
+  assert.deepEqual(view.cleanups, ['note-a', 'camera-b']);
+  assert.deepEqual([...view.subscriptions], ['note-a', 'camera-b']);
+  assert.deepEqual(view.state.data, { devices: { refreshed: true } });
+});
+
+test('a replacement connection clears the prior board immediately and ignores the stale resync read', async () => {
+  const oldRead = deferred();
+  const newRead = deferred();
+  let reads = 0;
+  const view = await authoringRender({ loadData: () => {
+    reads += 1;
+    return reads === 1 ? { data: {}, errors: {} } : reads === 2 ? oldRead.promise : newRead.promise;
+  } });
+  await view.render.renderDashboard();
+  const staleRendering = view.render.renderDashboard();
+  view.state.client = { id: 'replacement-client' };
+  const newRendering = view.render.renderDashboard();
+  assert.equal(view.board.children.length, 0, 'private content from the former connection cannot remain visible');
+  assert.equal(view.subscriptions.size, 0);
+  oldRead.resolve({ data: { privateOldData: true }, errors: {} });
+  await staleRendering;
+  assert.deepEqual(view.state.data, {});
+  assert.deepEqual(view.mounts, ['note-a', 'camera-b']);
+  newRead.resolve({ data: { currentData: true }, errors: {} });
+  await newRendering;
+  assert.deepEqual(view.state.data, { currentData: true });
+  assert.deepEqual(view.mounts, ['note-a', 'camera-b', 'note-a', 'camera-b']);
+});
+
+test('disconnect and a different dashboard clear mounted content before any replacement data is ready', async () => {
+  for (const change of ['disconnect', 'dashboard']) {
+    const pending = deferred();
+    let reads = 0;
+    const view = await authoringRender({ loadData: () => ++reads === 1 ? { data: {}, errors: {} } : pending.promise });
+    await view.render.renderDashboard();
+    if (change === 'disconnect') view.state.client = null;
+    else {
+      view.state.dashboards.next = { id: 'next', name: 'Next', columns: [] };
+      view.state.dashboardId = 'next';
+    }
+    const rendering = view.render.renderDashboard();
+    assert.equal(view.board.children.length, 0);
+    assert.equal(view.subscriptions.size, 0);
+    pending.resolve({ data: {}, errors: {} });
+    await rendering;
+    assert.equal(view.subscriptions.size, 0);
+  }
+});
+
+test('a dashboard edit during a delayed resync retains the latest layout and rechecks its data requirements', async () => {
+  const pending = deferred();
+  let reads = 0;
+  const view = await authoringRender({ loadData: () => ++reads === 2 ? pending.promise : { data: {}, errors: {} } });
+  await view.render.renderDashboard();
+  const rendering = view.render.renderDashboard();
+  view.state.dashboards.board = structuredClone(view.state.dashboards.board);
+  view.state.dashboards.board.columns[0].widgets.push({ id: 'added-during-resync', type: 'note' });
+  view.render.updateBoard();
+  assert.deepEqual(view.board.children[0].children.filter((node) => node.dataset.widgetId).map((node) => node.dataset.widgetId),
+    ['note-a', 'camera-b', 'added-during-resync']);
+  pending.resolve({ data: { staleResync: true }, errors: {} });
+  await rendering;
+  assert.equal(reads, 3, 'the resync uses the current layout’s data requirements');
+  assert.deepEqual(view.state.data, {});
+  assert.deepEqual(view.board.children[0].children.filter((node) => node.dataset.widgetId).map((node) => node.dataset.widgetId),
+    ['note-a', 'camera-b', 'added-during-resync']);
+});
+
+test('a highlight opened during a delayed resync holds the mounted widget until it is released', async () => {
+  const pending = deferred();
+  let reads = 0;
+  const view = await authoringRender({ loadData: () => ++reads === 2 ? pending.promise : { data: {}, errors: {} } });
+  await view.render.renderDashboard();
+  const camera = view.board.children[0].children[1];
+  const rendering = view.render.renderDashboard();
+  view.render.holdBoard(true);
+  pending.resolve({ data: {}, errors: {} });
+  await rendering;
+  assert.equal(view.board.children[0].children[1], camera);
+  assert.deepEqual(view.cleanups, []);
+  view.render.holdBoard(false);
+  await new Promise(setImmediate);
+  assert.deepEqual(view.cleanups, ['note-a', 'camera-b']);
+});
+
+test('holding a highlighted board never preserves private widgets across a replacement connection', async () => {
+  const pending = deferred();
+  let reads = 0;
+  const view = await authoringRender({ loadData: () => ++reads === 1 ? { data: {}, errors: {} } : pending.promise });
+  await view.render.renderDashboard();
+  const camera = view.state.dashboards.board.columns[0].widgets[1];
+  assert.ok(view.render.drawnWidget('board', camera));
+  view.render.holdBoard(true);
+  view.state.client = { id: 'replacement-client' };
+  assert.equal(view.render.drawnWidget('board', camera), null);
+  await view.render.renderDashboard();
+  assert.equal(view.board.children.length, 0);
+  assert.equal(view.subscriptions.size, 0);
+  view.render.holdBoard(false);
+  pending.resolve({ data: {}, errors: {} });
+  await new Promise(setImmediate);
+  assert.deepEqual([...view.subscriptions], ['note-a', 'camera-b']);
+});
 
 test('reordering widgets keeps the Add widget control last and leaves the heavier live widget in place', async () => {
   const view = await authoringRender();

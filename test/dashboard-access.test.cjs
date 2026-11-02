@@ -623,6 +623,87 @@ test('different active pollers preserve shared history and continuously observed
   await f.access.close();
 });
 
+test('tabs sharing one browser connection keep separate subscriptions without repeated resets', async () => {
+  const f = fixture();
+  const { token } = f.access.issue({ screenId: SCREEN });
+  const first = { token, pollerId: 'a'.repeat(32), subscriptions: [{ uri: 'homey:manager:dashboards', event: 'dashboard.update' }] };
+  const second = { token, pollerId: 'b'.repeat(32), subscriptions: [{ uri: 'homey:manager:users', event: 'user.update' }] };
+  let a = await f.access.events(first);
+  let b = await f.access.events(second);
+  for (let round = 0; round < 3; round += 1) {
+    a = await f.access.events({ ...first, cursor: a.cursor });
+    b = await f.access.events({ ...second, cursor: b.cursor });
+    assert.equal(a.reset, undefined, 'the other tab must not drop this tab’s observed topic');
+    assert.equal(b.reset, undefined, 'alternating polls must retain both tabs’ topic coverage');
+  }
+  assert.equal(f.access.pollers.size, 2);
+  f.topics.get('homey:manager:users').emit('realtime', 'user.update', { id: 'user-123', present: true });
+  a = await f.access.events({ ...first, cursor: a.cursor });
+  b = await f.access.events({ ...second, cursor: b.cursor });
+  assert.deepEqual(a.events, []);
+  assert.equal(b.events[0].data.present, true);
+  await f.access.events({ ...first, subscriptions: [], cursor: a.cursor });
+  assert.equal(f.released.has('homey:manager:users'), false, 'closing one view preserves another view’s subscriptions');
+  await f.access.revokeScreen(SCREEN);
+  assert.equal(f.access.pollers.size, 0, 'revocation removes every view for the approved connection');
+  assert.equal(f.released.get('homey:manager:users'), 1);
+  await assert.rejects(f.access.events(second), denied(401));
+  await f.access.close();
+});
+
+test('view identities are credential-scoped and coexist with clients without a view identity', async () => {
+  const f = fixture();
+  const first = f.access.issue({ screenId: SCREEN });
+  const second = f.access.issue({ screenId: 'screen-second-tab' });
+  const dashboards = { uri: 'homey:manager:dashboards', event: 'dashboard.update' };
+  const users = { uri: 'homey:manager:users', event: 'user.update' };
+  const pollerId = 'a'.repeat(32);
+  const a = await f.access.events({ token: first.token, pollerId, subscriptions: [dashboards] });
+  const b = await f.access.events({ token: second.token, pollerId, subscriptions: [users] });
+  const legacy = await f.access.events({ token: first.token, subscriptions: [users] });
+  assert.equal(f.access.pollers.size, 3);
+  assert.equal((await f.access.events({ token: first.token, pollerId, subscriptions: [dashboards], cursor: a.cursor })).reset, undefined);
+  assert.equal((await f.access.events({ token: second.token, pollerId, subscriptions: [users], cursor: b.cursor })).reset, undefined);
+  assert.equal((await f.access.events({ token: first.token, subscriptions: [users], cursor: legacy.cursor })).reset, undefined);
+  await f.access.revokeScreen(SCREEN);
+  assert.equal(f.access.pollers.size, 1);
+  assert.equal(f.topics.get(users.uri).listenerCount('realtime'), 1);
+  await f.access.close();
+});
+
+test('view identities reject malformed values and bound live views while expired slots can be reused', async () => {
+  const f = fixture();
+  const { token } = f.access.issue({ screenId: SCREEN });
+  for (const pollerId of [null, '', 'a'.repeat(31), 'a'.repeat(33), 'G'.repeat(32), [], {}]) {
+    await assert.rejects(f.access.events({ token, pollerId }), denied(400));
+  }
+  assert.equal(f.access.pollers.size, 0);
+  for (let i = 0; i < 16; i += 1) await f.access.events({ token, pollerId: i.toString(16).padStart(32, '0') });
+  await f.access.events({ token, pollerId: '0'.repeat(32) });
+  await assert.rejects(f.access.events({ token, pollerId: 'f'.repeat(32) }), denied(429));
+  assert.equal(f.access.pollers.size, 16);
+  f.advance(120001);
+  await f.access.events({ token, pollerId: 'f'.repeat(32) });
+  assert.equal(f.access.pollers.size, 1);
+  await f.access.close();
+});
+
+test('total active views stay bounded across approved sessions', async () => {
+  const f = fixture();
+  for (let screen = 0; screen < 16; screen += 1) {
+    const { token } = f.access.issue({ screenId: `screen-limit-${screen}` });
+    for (let view = 0; view < 16; view += 1) await f.access.events({ token, pollerId: view.toString(16).padStart(32, '0') });
+  }
+  assert.equal(f.access.pollers.size, 256);
+  const { token } = f.access.issue({ screenId: 'screen-over-limit' });
+  await assert.rejects(f.access.events({ token, pollerId: 'a'.repeat(32) }), denied(429));
+  assert.equal(f.access.pollers.size, 256);
+  await f.access.revokeScreen('screen-limit-0');
+  await f.access.events({ token, pollerId: 'a'.repeat(32) });
+  assert.equal(f.access.pollers.size, 241);
+  await f.access.close();
+});
+
 test('shutdown awaits owned API unregister calls, handles failures, and releases an in-flight registration', async () => {
   const f = fixture();
   const { token } = f.access.issue({ screenId: SCREEN });
