@@ -1,4 +1,7 @@
 {
+  "1.7.0": {
+    "en": "Arrange widgets with mouse, touch or keyboard and snap them into native columns. Resize web widgets from a corner with sizes saved on Homey and shared across browsers; native speaker, timeline and web-frame size controls remain available separately. Remove columns after confirming where their widgets should move. Layout edits and size updates preserve running widget and camera content."
+  },
   "1.6.0": {
     "en": "Create native Homey dashboards from the web, starting blank or copying a layout. Add columns and built-in or app widgets with a searchable picker and settings drafts that save only when confirmed. Shared layouts appear in the Homey mobile apps; a lost creation response is checked before another request is sent."
   },

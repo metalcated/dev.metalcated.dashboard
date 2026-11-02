@@ -72,13 +72,14 @@ async function harness({ storage = async () => true, script = async () => {} } =
       },
     },
     './render.js': {
-      redrawWidgets: noop, updateBoard: noop,
+      redrawWidgets: noop, refreshWidgetSizes: noop, updateBoard: noop,
       renderDashboard: async () => { rendered.push({ client: state.client?.id, ids: Object.keys(state.dashboards) }); },
     },
     './screen.js': { adoptScreenId: noop, registerScreen: async () => {}, screenId: () => 'screen', watchScreen: noop },
     './state.js': { STORAGE_KEY: 'test', params: new URLSearchParams(), state },
     './updates.js': { checkForUpdate: async () => {}, watchUpdates: noop },
     './widget-modes.js': { loadWidgetModes: async () => {}, watchWidgetModes: noop },
+    './widget-sizes.js': { loadWidgetSizes: async () => {}, watchWidgetSizes: noop },
   };
   const context = vm.createContext({
     console, URLSearchParams,

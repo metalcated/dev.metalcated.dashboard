@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const Homey = require('homey');
 const { DashboardAccess } = require('./lib/dashboard-access');
+const WidgetSizes = require('./lib/widget-sizes');
 
 // What the dashboard needs, named as in my.homey.app's API key form (group → box); that form lacks the first and the
 // energy one, so those are named by scope.
@@ -124,6 +125,7 @@ module.exports = class DashboardApp extends Homey.App {
   async onInit() {
     // Waiting browsers live in memory only; a restart simply asks them for a new code.
     this.pairings = new Map();
+    this.widgetSizesClosing = false;
     this.getDashboardAccess();
 
     // e.g. "192.168.3.210:80"; a Homey Self-Hosted Server has its own http port, by default 4859.
@@ -146,7 +148,10 @@ module.exports = class DashboardApp extends Homey.App {
   async requestWorkspace(body) { return this.getDashboardAccess().request(body); }
   async workspaceEvents(body) { return this.getDashboardAccess().events(body); }
 
-  async onUninit() { await this.dashboardAccess?.close(); }
+  async onUninit() {
+    this.widgetSizesClosing = true;
+    await this.dashboardAccess?.close();
+  }
 
   // *.homey.homeylocal.com resolves to the Homey on the local network and has a valid HTTPS certificate. A Homey Pro
   // serves it on 443; a Homey Self-Hosted Server on a port of its own, by default the one after its http port (4860),
@@ -391,6 +396,69 @@ module.exports = class DashboardApp extends Homey.App {
     this.homey.settings.set('widgetModes', modes);
     this.homey.api.realtime('widget-modes', modes);
     return modes;
+  }
+
+  // ----- Web widget dimensions, shared across approved browsers -----
+
+  async widgetSizes() {
+    const dashboards = await this.getFromHomey('/api/manager/dashboards/dashboard');
+    const ids = WidgetSizes.widgetInventory(dashboards);
+    return WidgetSizes.sanitizeSizes(this.homey.settings.get(WidgetSizes.SETTINGS_KEY), ids);
+  }
+
+  async requireWidgetSizeEditing(token) {
+    if (this.widgetSizesClosing) throw WidgetSizes.failure('The dashboard app is restarting. Reconnect shortly.', 503);
+    if (typeof token !== 'string' || !token || token.length > 4096) throw WidgetSizes.failure('Connect this screen to Homey again.', 401);
+    const access = this.getDashboardAccess();
+    let scopes;
+    if (access.isBrokerToken(token)) {
+      // Unlike checkKey's older broker compatibility path, a size write must verify the backend credential's real
+      // effective grant. Possessing a valid read-only screen connection never implies permission to edit.
+      const session = await access.request({ token, method: 'GET', path: '/api/manager/sessions/session/me' });
+      access.authorize(token);
+      scopes = session?.intersectedScopes ?? session?.scopes;
+    } else {
+      scopes = await this.keyScopes(token).catch(() => null);
+      if (!Array.isArray(scopes)) throw WidgetSizes.failure('Homey does not accept this key.', 401);
+    }
+    if (!Array.isArray(scopes) || !grants(scopes, 'homey.dashboard')) {
+      throw WidgetSizes.failure('This connection can only view dashboards. Dashboard editing permission is needed to resize widgets.', 403);
+    }
+    if (this.widgetSizesClosing) throw WidgetSizes.failure('The dashboard app is restarting. Reconnect shortly.', 503);
+  }
+
+  async setWidgetSize(id, body = {}) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+        || Object.keys(body).some((key) => !['token', 'size'].includes(key))
+        || !Object.prototype.hasOwnProperty.call(body, 'size') || !WidgetSizes.validWidgetId(id)) {
+      throw WidgetSizes.failure('Choose an existing dashboard widget and a valid size.');
+    }
+    const token = body.token;
+    const size = WidgetSizes.normalizeSize(body.size);
+    await this.requireWidgetSizeEditing(token);
+    const work = (this.widgetSizeQueue ?? Promise.resolve()).then(async () => {
+      await this.requireWidgetSizeEditing(token);
+      const dashboards = await this.getFromHomey('/api/manager/dashboards/dashboard');
+      const ids = WidgetSizes.widgetInventory(dashboards);
+      if (!ids.has(id)) throw WidgetSizes.failure('This widget is no longer on a dashboard. Reopen the dashboard.', 404);
+      // Revalidate after the inventory read, then commit synchronously so a revoked/replaced connection or app
+      // shutdown during that read cannot leave a late settings write behind.
+      await this.requireWidgetSizeEditing(token);
+      if (this.getDashboardAccess().isBrokerToken(token)) this.getDashboardAccess().authorize(token);
+      const next = WidgetSizes.sanitizeSizes(this.homey.settings.get(WidgetSizes.SETTINGS_KEY), ids);
+      if (size === null) delete next[id];
+      else {
+        if (!Object.prototype.hasOwnProperty.call(next, id) && Object.keys(next).length >= WidgetSizes.MAX_WIDGET_SIZES) {
+          throw WidgetSizes.failure('Reset an unused widget size before adding another size override.', 409);
+        }
+        next[id] = size;
+      }
+      this.homey.settings.set(WidgetSizes.SETTINGS_KEY, next);
+      this.homey.api.realtime('widget-sizes', next);
+      return next;
+    });
+    this.widgetSizeQueue = work.catch(() => {});
+    return work;
   }
 
   // ----- Screens (named browsers flow cards can aim at) -----

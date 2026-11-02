@@ -60,9 +60,18 @@ Pick the dashboard by tapping its name at the top (as in the app), with a dashbo
 
 **Create a dashboard**: choose **+** beside the desktop **Dashboards** heading, or **New dashboard** in a narrow view. Enter its name and start blank or copy an existing layout. The dashboard is saved to Homey, appears in the sidebar, and opens in Edit mode. **Add column** creates another native column; each column has **Add widget**. The searchable picker includes the built-in widgets this renderer supports and non-deprecated widgets from installed apps. Configure the draft, then choose **Add widget** to save it. Closing or cancelling before saving adds nothing. Shared native layouts are the same ones used by the Homey iOS and Android apps; no extension update or second API key is needed when the existing connection has dashboard editing permission.
 
-Copying reads the latest layout, preserves widget settings, and assigns independent column and widget IDs. Dashboard shortcuts keep their existing targets. Note text and app-widget saved content live separately from the layout and start fresh; the creation modal explains this before copying. New notes can have their color set here, while note text is still written in the Homey mobile app.
+Copying reads the latest layout, preserves widget settings, and assigns independent column and widget IDs. Dashboard shortcuts keep their existing targets. Note text, app-widget saved content, and web-only size overrides live separately from the native layout and start fresh; the creation modal explains this before copying. Native Compact/Large choices and web-frame height fields remain part of the copied widget settings. New notes can have their color set here, while note text is still written in the Homey mobile app.
 
 Creation failures retain the draft. If Homey's response is lost, the app checks the new layout's unique identity before showing success. An unconfirmed result offers **Check creation**, with its name and source fixed until resolved, rather than automatically posting a duplicate. Widget and column additions use the existing queued read/modify/write path so unrelated edits made on mobile are retained. New cameras start with autoplay off; selecting a camera and its registered source, plus **Auto start stream**, uses the existing native fields.
+
+**Arrange and lock the layout**: in **Edit**, drag a widget's move handle to another position or column. A blue insertion line shows the snapped destination, including empty columns. Touch and pen use the same handle. For a keyboard, focus a move handle, press **Space** or **Enter**, use the arrow keys, then press **Space/Enter** to save or **Escape** to cancel. The existing arrow-menu moves remain available. **Done** hides the edit controls and locks movement and resizing. Positions remain native ordered columns, shared with iOS and Android; this is not a separate free-position canvas.
+
+**Resize**: drag the lower-right corner in Edit mode. Width stays within its column and dimensions snap to the size grid, so cards do not overlap. A resize handle also supports **Space/Enter**, arrow keys, and **Escape**. Corner sizes are web display preferences saved in Homey's settings database and shared across browsers; native mobile apps keep their normal sizes. **Edit Widget → Web size → Reset web size → Save** restores the automatic size. Speaker and Timeline **Widget size** (Compact/Large), and a web frame's **Height in Homey**, use the existing native widget fields and are shared with the mobile apps. Native size choices and web display overrides can both be used; resetting a web override reveals the native size again.
+
+**Remove columns**: each column has **Remove** in Edit mode. The modal reads the current layout before confirmation. Empty columns can be removed; populated columns require a destination for their widgets and **Move widgets and remove column**. Widget IDs, settings and stored content are retained. At least one column stays in the dashboard. If another client adds or removes widgets while confirmation is open, the save stops and asks for a fresh confirmation. No column operation silently deletes its widgets.
+
+Layout moves and column changes preserve unchanged widget sections instead of remounting them. Size changes apply styles in place, including realtime updates from another browser. The web size map is separate from native layouts, accepts only bounded numeric dimensions for widgets currently on a dashboard, and checks the backend credential's actual effective dashboard-edit permission before each save. Revoked connections and app shutdown cancel late writes. Save failures never automatically replay a native move or settings write.
+
 
 Live camera widgets respect each native widget's Autoplay setting. Otherwise, **Play live video** starts its stream. The preview comes from the camera integration's saved image; Eufy can supply a placeholder until it has a real snapshot. Opening live video does not itself replace that saved preview. A connection that sends no video for one minute stops and offers a manual retry. Duplicate visibility notifications keep the current connection, and hiding or removing a widget cancels its pending connection work. Returning after an event-subscription gap reloads the current Homey dashboard definitions.
 
@@ -116,6 +125,8 @@ Routes in `api.js` (`/api/app/dev.schweiger.dashboard/…`):
 | `GET /screens`, `PUT /screens/:id`, `DELETE /screens/:id` | settings page | list, rename (`{ name }`) and forget screens; changes are also sent as the realtime event `screens`. Approving a pairing takes `{ name }` too |
 | `GET /highlight?screen=<id>` | public | that screen's highlight `{ highlight: { id, target, dashboardId, widgetId, name, dashboardName, size } }` or `{ highlight: null }` (the all-screens one without a known id); changes are sent as the realtime event `highlight` with every screen's |
 | `POST /highlight/close` | public | a dashboard closed a highlight: `{ token, id }`; acts only if Homey accepts the token, on every screen showing that `id` |
+| `GET /widget-sizes` | authenticated app API / broker | web dimensions for existing native widgets |
+| `PUT /widget-sizes/:id` | validated dashboard editor | `{ token, size: { width, height } }`, or `size: null` to reset; effective dashboard-write permission and native widget membership are rechecked |
 | `GET /widget-modes` | public | how app widgets run, by widget id: `storage` or `trusted` (missing: `sandboxed`); changes are sent as the realtime event `widget-modes` |
 | `PUT /widget-modes/:id` | public | `{ token, mode }`; acts only if the token has `homey.dashboard`; drops widgets no longer on a dashboard |
 
@@ -133,6 +144,10 @@ assets/web/
   css/                  tokens (light/dark), base layout, widgets, popups
   js/main.js            entry: connect, pick the dashboard, live updates, setup form
   js/dashboard-editor.js new-dashboard modal and blank/copy workflow
+  js/column-editor.js    reviewed column removal with widget transfer
+  js/layout-drag.js      pointer and keyboard native widget movement
+  js/layout-resize.js    pointer and keyboard web-size preview and save
+  js/widget-sizes.js     shared web size cache and style-only updates
   js/widget-catalog.js  native widget drafts for the searchable add picker
   js/pairing.js         asks the app for a code and waits for approval
   js/screen.js          this browser's lasting screen id and the name the app gives it

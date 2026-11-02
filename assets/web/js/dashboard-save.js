@@ -170,6 +170,62 @@ export function addDashboardWidget(dashboardId, columnId, widget) {
   });
 }
 
+// Drops address native identities rather than screen positions. Resolve them again in the queued fresh layout so
+// a phone adding or moving a different widget while this drag was in progress cannot be overwritten.
+export function moveDashboardWidget(dashboardId, widgetId, targetColumnId, beforeWidgetId = null) {
+  requireEditing();
+  if (typeof widgetId !== 'string' || !widgetId || typeof targetColumnId !== 'string' || !targetColumnId
+      || (beforeWidgetId !== null && (typeof beforeWidgetId !== 'string' || !beforeWidgetId))) {
+    throw new Error('Choose a widget and a destination in the dashboard grid.');
+  }
+  return updateDashboard(dashboardId, (columns) => {
+    requireEditing();
+    const from = locateWidget(columns, widgetId);
+    const target = columns.find((column) => column.id === targetColumnId);
+    if (!target || !Array.isArray(target.widgets)) throw new Error('The destination column was removed meanwhile. Choose another position.');
+    const before = beforeWidgetId === null ? target.widgets.length : target.widgets.findIndex((widget) => widget.id === beforeWidgetId);
+    if (before < 0) throw new Error('The widget beside this drop position moved or was removed meanwhile. Choose another position.');
+    const source = columns[from.column];
+    if (source === target) {
+      // A drop on itself, directly before its next sibling, or after the last widget changes nothing.
+      if (beforeWidgetId === widgetId || before - (before > from.index ? 1 : 0) === from.index) return false;
+    }
+    source.widgets.splice(from.index, 1);
+    const at = beforeWidgetId === null ? target.widgets.length : target.widgets.findIndex((widget) => widget.id === beforeWidgetId);
+    target.widgets.splice(at, 0, from.widget);
+  });
+}
+
+// Removing a populated column moves its widgets intact. The modal confirms the membership it actually showed;
+// changes to that membership require a fresh confirmation instead of moving an unexpected group of widgets.
+export function removeDashboardColumn(dashboardId, columnId, { targetColumnId = null, expectedWidgetIds } = {}) {
+  requireEditing();
+  if (typeof columnId !== 'string' || !columnId || (targetColumnId !== null && (typeof targetColumnId !== 'string' || !targetColumnId))
+      || !Array.isArray(expectedWidgetIds) || expectedWidgetIds.some((id) => typeof id !== 'string' || !id)
+      || new Set(expectedWidgetIds).size !== expectedWidgetIds.length) {
+    throw new Error('Reopen Remove column to confirm its current widgets.');
+  }
+  const confirmed = new Set(expectedWidgetIds);
+  return updateDashboard(dashboardId, (columns) => {
+    requireEditing();
+    const sourceIndex = columns.findIndex((column) => column.id === columnId);
+    const source = columns[sourceIndex];
+    if (!source || !Array.isArray(source.widgets)) throw new Error('This column was removed meanwhile. Reopen the dashboard.');
+    if (columns.length <= 1) throw new Error('Keep at least one column in the dashboard.');
+    if (source.widgets.length !== confirmed.size || source.widgets.some((widget) => !confirmed.has(widget.id))) {
+      throw new Error('The widgets in this column changed meanwhile. Reopen Remove column to review them.');
+    }
+    if (source.widgets.length > 0) {
+      const target = columns.find((column) => column.id === targetColumnId);
+      if (!target || !Array.isArray(target.widgets) || target === source) {
+        throw new Error('Choose another existing column for these widgets.');
+      }
+      target.widgets.push(...source.widgets);
+    }
+    columns.splice(sourceIndex, 1);
+  });
+}
+
 // mutate(columns) changes the dashboard's columns in place; it throws to cancel. The saved dashboard is announced as
 // 'dashboard-saved', so the page shows it before Homey's own update arrives. Optimistic: the page shows the change
 // before it is saved (a move), and what Homey has if saving fails.
@@ -193,7 +249,8 @@ export function updateDashboard(dashboardId, mutate, { optimistic = false } = {}
       const dashboard = await client.api('GET', path);
       requireCurrent();
       const columns = structuredClone(dashboard.columns ?? []);
-      mutate(columns);
+      // An explicit false reports a fresh native no-op without sending a redundant write.
+      if (mutate(columns) === false) return dashboard;
       const saved = await client.api('PUT', path, { columns });
       requireCurrent();
       return saved;

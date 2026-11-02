@@ -4,20 +4,27 @@
 
 import { NO_EDIT_PERMISSION, addDashboardColumn, canEditDashboards, locateWidget, updateDashboard } from './dashboard-save.js';
 import { $, el, toast } from './dom.js';
-import { CHEVRON_DOWN, CHEVRON_LEFT, CHEVRON_RIGHT, CHEVRON_UP, EDIT_ICON, MORE_ICON, TRASH_ICON } from './icons.js';
+import { CHEVRON_DOWN, CHEVRON_LEFT, CHEVRON_RIGHT, CHEVRON_UP, DRAG_ICON, EDIT_ICON, MORE_ICON, TRASH_ICON } from './icons.js';
 import { isKiosk } from './kiosk.js';
+import { openRemoveColumn } from './column-editor.js';
+import { initLayoutDrag } from './layout-drag.js';
+import { initLayoutResize } from './layout-resize.js';
 import { openWidgetSettings } from './sheets/widget-settings.js';
 import { openWidgetPicker } from './sheets/widget-picker.js';
 import { state } from './state.js';
 
 let menu = null; // The open widget menu, if any.
 let menuAnchor = null; // Its widget's ••• button.
+let layoutDrag = null;
+let layoutResize = null;
 
 export function isEditing() {
   return document.documentElement.classList.contains('editing');
 }
 
 export function setEditing(on) {
+  if (!on) layoutDrag?.cancel();
+  if (!on) layoutResize?.cancel();
   closeMenu();
   document.documentElement.classList.toggle('editing', on);
   $('edit-button').textContent = on ? 'Done' : 'Edit';
@@ -51,6 +58,8 @@ async function change(dashboardId, mutate) {
 }
 
 function openMenu(anchor, { dashboardId, widgetId, name }) {
+  layoutDrag?.cancel();
+  layoutResize?.cancel();
   closeMenu();
   // Where the widget is now: earlier moves didn't draw the board again.
   const all = state.dashboards[dashboardId]?.columns ?? [];
@@ -126,6 +135,19 @@ function openMenu(anchor, { dashboardId, widgetId, name }) {
 // The edit-mode layer over a drawn widget (render.js): it takes the taps, so the widget can't be used while editing,
 // and opens the widget's menu. widget: { dashboardId, widgetId, name }.
 export function addEditTools(section, widget) {
+  const handle = el('button', 'widget-drag-handle');
+  handle.type = 'button';
+  handle.innerHTML = DRAG_ICON;
+  handle.setAttribute('aria-label', `Move ${widget.name}`);
+  handle.setAttribute('aria-describedby', 'layout-edit-hint');
+  handle.title = 'Drag to move, or press Space and use the arrow keys';
+  section.append(handle);
+  const resize = el('button', 'widget-resize-handle');
+  resize.type = 'button';
+  resize.setAttribute('aria-label', `Resize ${widget.name} in web view`);
+  resize.title = 'Resize in the web view. Mobile apps keep their native size.';
+  resize.textContent = '◢';
+  section.append(resize);
   const layer = el('button', 'widget-edit');
   layer.type = 'button';
   layer.setAttribute('aria-label', `Options for ${widget.name}`);
@@ -138,10 +160,39 @@ export function addEditTools(section, widget) {
 }
 
 export function addColumnTools(columnNode, dashboardId, columnId) {
+  const columns = state.dashboards[dashboardId]?.columns ?? [];
+  const index = columns.findIndex((column) => column.id === columnId);
+  columnNode.dataset.columnId = columnId;
+  columnNode.dataset.dashboardId = dashboardId;
+  const existing = columnNode.querySelector('.column-edit-tools');
+  if (existing) {
+    existing.querySelector('.column-edit-label').textContent = `Column ${index + 1}`;
+    const remove = existing.querySelector('.column-remove');
+    remove.setAttribute('aria-label', `Remove column ${index + 1}`);
+    remove.disabled = columns.length <= 1;
+    remove.title = remove.disabled ? 'Keep at least one column' : 'Remove this column';
+    return;
+  }
+  const tools = el('div', 'column-edit-tools');
+  const label = el('span', 'column-edit-label', `Column ${index + 1}`);
+  const remove = el('button', 'column-remove', 'Remove');
+  remove.type = 'button';
+  remove.setAttribute('aria-label', `Remove column ${index + 1}`);
+  remove.disabled = columns.length <= 1;
+  remove.title = remove.disabled ? 'Keep at least one column' : 'Remove this column';
+  remove.addEventListener('click', () => {
+    layoutDrag?.cancel();
+    layoutResize?.cancel();
+    openRemoveColumn(dashboardId, columnId);
+  });
+  tools.append(label, remove);
+  columnNode.prepend(tools);
   const add = el('button', 'column-add-widget', '＋ Add widget');
   add.type = 'button';
   add.setAttribute('aria-label', 'Add widget');
   add.addEventListener('click', () => {
+    layoutDrag?.cancel();
+    layoutResize?.cancel();
     if (!canEditDashboards()) return toast(NO_EDIT_PERMISSION);
     openWidgetPicker(dashboardId, columnId);
   });
@@ -149,6 +200,14 @@ export function addColumnTools(columnNode, dashboardId, columnId) {
 }
 
 export function initEditMode() {
+  layoutDrag = initLayoutDrag({ isEditing });
+  layoutResize = initLayoutResize({ isEditing, onStart: () => layoutDrag?.cancel() });
+  document.addEventListener('pointerdown', (event) => {
+    if (event.target.closest?.('.widget-drag-handle')) layoutResize?.cancel();
+  }, { capture: true });
+  document.addEventListener('keydown', (event) => {
+    if (event.target.closest?.('.widget-drag-handle') && [' ', 'Enter'].includes(event.key)) layoutResize?.cancel();
+  }, { capture: true });
   let addingColumn = false;
   $('add-column-button').addEventListener('click', async () => {
     if (addingColumn || !isEditing() || !state.dashboardId) return;

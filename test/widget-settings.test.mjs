@@ -42,6 +42,8 @@ async function harness({ autoplay = false, omitAutoplay = false, type = 'device_
     { id: 'other', type: 'future_mobile_widget', data: { untouched: true } },
   ] }] };
   let server = clone(initial), denied = false;
+  let webSize = null, sizeFailure = null;
+  const sizeCalls = [];
   const calls = [], events = [], toasts = [], peers = [], timers = new Map();
   const document = new Element('document'); document.body = new Element('body'); document.append(document.body);
   document.querySelector = selector => document.body.querySelector(selector);
@@ -71,6 +73,11 @@ async function harness({ autoplay = false, omitAutoplay = false, type = 'device_
     'widgets/sensors.js': { sensorStyle: () => ({}) },
     'widget-modes.js': { WIDGET_MODES: [], canChooseWidgetMode: () => false, widgetMode: () => 'sandboxed',
       saveWidgetMode: () => assert.fail('camera settings must not create app-specific preferences') },
+    'widget-sizes.js': { widgetSize: () => clone(webSize), saveWidgetSize: async (id, size) => {
+      sizeCalls.push({ id, size });
+      if (sizeFailure) throw sizeFailure;
+      webSize = clone(size);
+    } },
     'zones.js': { zoneIcon: () => new Element(), zoneOrder: () => [] },
     'embedded.js': { isDashboardVisible: () => true, subscribeDashboardVisibility: () => noop },
   };
@@ -109,7 +116,9 @@ async function harness({ autoplay = false, omitAutoplay = false, type = 'device_
   }
   const editor = await ready('sheets/widget-settings.js');
   return {
-    state, document, calls, events, toasts, peers, timers,
+    state, document, calls, events, toasts, peers, timers, sizeCalls,
+    setWebSize(size) { webSize = clone(size); },
+    denyWebSize(error) { sizeFailure = error; },
     get server() { return server; },
     deny(value) { denied = value; },
     editServer(mutate) { mutate(server); },
@@ -351,4 +360,144 @@ test('editing an existing web address uses the same validation without altering 
   await view.control(dialog, 'Save').click();
   assert.equal(view.server.columns[0].widgets[0].data.url, 'https://example.com');
   assert.deepEqual(view.server.columns[0].widgets[0].data.mobileOption, { keep: true });
+});
+
+test('speaker and timeline size variants save native types while preserving widget identities and current mobile settings', async () => {
+  for (const [large, compact] of [
+    ['device_speaker_large', 'device_speaker_small'],
+    ['notifications_timeline_large', 'notifications_timeline_small'],
+  ]) {
+    const view = await harness({ type: large });
+    const dialog = await view.open();
+    const size = view.control(dialog, 'Widget size');
+    assert.equal(size.value, large);
+    size.value = compact; await size.emit('change');
+    assert.deepEqual(view.calls, [], 'changing the size remains an unsaved draft');
+    view.editServer(server => { server.columns[0].widgets[0].data.mobileChange = 'preserved'; });
+    await view.control(dialog, 'Save').click();
+    const saved = view.server.columns[0].widgets[0];
+    assert.equal(saved.id, 'camera');
+    assert.equal(saved.type, compact);
+    assert.equal(saved.data.mobileChange, 'preserved');
+    assert.deepEqual(saved.data.mobileOption, { keep: true });
+    assert.equal(view.server.columns[0].widgets[1].type, 'future_mobile_widget');
+    const reopened = await view.open();
+    assert.equal(view.control(reopened, 'Widget size').value, compact);
+  }
+});
+
+test('closing a native size draft saves nothing and unrelated edits preserve a variant changed on mobile', async () => {
+  const view = await harness({ type: 'device_speaker_large' });
+  let dialog = await view.open();
+  let size = view.control(dialog, 'Widget size');
+  size.value = 'device_speaker_small'; await size.emit('change');
+  await view.control(dialog, 'Close').click();
+  assert.deepEqual(view.calls, []);
+  dialog = await view.open();
+  size = view.control(dialog, 'Widget size');
+  assert.equal(size.value, 'device_speaker_large');
+  view.editServer(server => { server.columns[0].widgets[0].type = 'device_speaker_small'; });
+  await view.control(dialog, 'Show Title').click();
+  await view.control(dialog, 'Save').click();
+  assert.equal(view.server.columns[0].widgets[0].type, 'device_speaker_small');
+});
+
+test('web frame height validates before saving and merges the known native height fields with newer metadata', async () => {
+  const view = await harness({ type: 'web_frame' });
+  view.state.dashboards.board.columns[0].widgets[0].data.height = { type: 3, value: '16:9', mobileMetadata: 'old' };
+  view.editServer(server => { server.columns[0].widgets[0].data.height = { type: 3, value: '16:9', mobileMetadata: 'new' }; });
+  const dialog = await view.open();
+  const height = view.control(dialog, 'Height in Homey');
+  assert.equal(height.value, '');
+  height.value = '79'; await height.emit('input');
+  await view.control(dialog, 'Save').click();
+  assert.equal(view.calls.length, 0);
+  assert.equal(dialog.open, true);
+  assert.equal(height.getAttribute('aria-invalid'), 'true');
+  height.value = '240'; await height.emit('input');
+  await view.control(dialog, 'Save').click();
+  assert.deepEqual(view.server.columns[0].widgets[0].data.height, { type: 1, value: 240, mobileMetadata: 'new' });
+  assert.deepEqual(view.server.columns[0].widgets[0].data.mobileOption, { keep: true });
+  const reopened = await view.open();
+  assert.equal(view.control(reopened, 'Height in Homey').value, 240);
+});
+
+test('clearing a height draft keeps the original native height instead of inventing a reset format', async () => {
+  const view = await harness({ type: 'web_frame' });
+  const original = { type: 3, value: '16:9' };
+  view.state.dashboards.board.columns[0].widgets[0].data.height = clone(original);
+  view.editServer(server => { server.columns[0].widgets[0].data.height = clone(original); });
+  const dialog = await view.open();
+  const height = view.control(dialog, 'Height in Homey');
+  height.value = '300'; await height.emit('input');
+  height.value = ''; await height.emit('input');
+  await view.control(dialog, 'Show Title').click();
+  await view.control(dialog, 'Save').click();
+  assert.deepEqual(view.server.columns[0].widgets[0].data.height, original);
+});
+
+test('an invalid native height remains visible and invalid when another setting redraws its page', async () => {
+  const view = await harness({ type: 'web_frame' });
+  const dialog = await view.open();
+  const firstHeight = view.control(dialog, 'Height in Homey');
+  firstHeight.value = '79'; await firstHeight.emit('input');
+  await view.control(dialog, 'Show Title').click();
+  const height = view.control(dialog, 'Height in Homey');
+  assert.notEqual(height, firstHeight);
+  assert.equal(height.value, '79');
+  assert.equal(height.getAttribute('aria-invalid'), 'true');
+  await view.control(dialog, 'Save').click();
+  assert.equal(view.calls.length, 0);
+  assert.equal(dialog.open, true);
+  height.value = '200'; await height.emit('input');
+  await view.control(dialog, 'Save').click();
+  assert.equal(dialog.open, false);
+  assert.deepEqual(view.server.columns[0].widgets[0].data.height, { type: 1, value: 200 });
+});
+
+test('Reset web size is a separate draft setting and only clears the shared web override on Save', async () => {
+  const view = await harness();
+  view.setWebSize({ width: 240, height: 180 });
+  let dialog = await view.open();
+  const reset = () => dialog.find(node => node.tagName === 'button' && node.textContent.includes('Reset web size'));
+  await reset().click();
+  assert.deepEqual(view.sizeCalls, []);
+  await view.control(dialog, 'Close').click();
+  assert.deepEqual(view.sizeCalls, []);
+  dialog = await view.open();
+  await reset().click();
+  await view.control(dialog, 'Save').click();
+  assert.deepEqual(view.sizeCalls, [{ id: 'camera', size: null }]);
+  assert.deepEqual(view.calls, [], 'resetting web size does not rewrite native mobile widgets');
+  assert.equal(dialog.open, false);
+});
+
+test('a refused web-size reset keeps the settings draft open for retry and never changes native layout data', async () => {
+  const view = await harness();
+  view.setWebSize({ width: 240, height: 180 });
+  view.denyWebSize(new Error('Resize permission was refused.'));
+  const dialog = await view.open();
+  await dialog.find(node => node.tagName === 'button' && node.textContent.includes('Reset web size')).click();
+  await view.control(dialog, 'Save').click();
+  assert.equal(dialog.open, true);
+  assert.match(view.toasts.at(-1), /Resize permission/);
+  assert.deepEqual(view.calls, []);
+  view.denyWebSize(null);
+  await view.control(dialog, 'Save').click();
+  assert.equal(dialog.open, false);
+  assert.deepEqual(view.calls, []);
+});
+
+test('new widgets offer native sizing where supported but never reset another widget’s web size', async () => {
+  const view = await harness({ type: 'device_speaker_large' });
+  view.state.dashboards.board.columns[0].widgets[0].data.speakerId = 'office';
+  const added = [];
+  const dialog = await view.open({ creating: true, actionLabel: 'Add widget', onSave: async (widget) => added.push(clone(widget)) });
+  assert.equal(dialog.find(node => node.tagName === 'button' && node.textContent.includes('Reset web size')), undefined);
+  const size = view.control(dialog, 'Widget size');
+  size.value = 'device_speaker_small'; await size.emit('change');
+  await view.control(dialog, 'Add widget').click();
+  assert.equal(added[0].type, 'device_speaker_small');
+  assert.equal(added[0].data.speakerId, 'office');
+  assert.deepEqual(view.sizeCalls, []);
 });

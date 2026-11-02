@@ -13,11 +13,12 @@ import { fetchHighlight, isHighlightOpen, showHighlight, watchHighlight } from '
 import { initKiosk, isKiosk, kioskHome, resetIdle, screenState, setKiosk, settleKioskHome } from './kiosk.js';
 import { createPairing } from './pairing.js';
 import { createRealtime, loadScript } from './realtime.js';
-import { redrawWidgets, renderDashboard, updateBoard } from './render.js';
+import { redrawWidgets, refreshWidgetSizes, renderDashboard, updateBoard } from './render.js';
 import { adoptScreenId, registerScreen, screenId, watchScreen } from './screen.js';
 import { STORAGE_KEY, params, state } from './state.js';
 import { checkForUpdate, watchUpdates } from './updates.js';
 import { loadWidgetModes, watchWidgetModes } from './widget-modes.js';
+import { loadWidgetSizes, watchWidgetSizes } from './widget-sizes.js';
 
 let connectionGeneration = 0;
 const currentConnection = (client, generation) => generation === connectionGeneration && state.client === client;
@@ -172,6 +173,7 @@ function watchHomey(client, generation) {
   }
   // A widget on this dashboard that is to run another way (sandboxed, with storage or trusted) is loaded again.
   watchWidgetModes(redrawWidgets);
+  watchWidgetSizes(refreshWidgetSizes);
   // Favorites live on the user, so re-render when they change in the mobile app.
   realtime.on('homey:manager:users', 'user.update', async (user) => {
     if (!current() || user?.id !== state.me?.id) return;
@@ -460,7 +462,7 @@ async function boot(connection) {
       checkForUpdate('reconnected');
       registerScreen();
       fetchHighlight();
-      loadWidgetModes().then(() => current() && refreshAll(client, generation)).catch((error) => {
+      Promise.all([loadWidgetModes(), loadWidgetSizes()]).then(() => current() && refreshAll(client, generation)).catch((error) => {
         if (!current()) return;
         if (isRevokedKey(error)) pairAgain(client, generation);
         else console.error(error);
@@ -488,6 +490,7 @@ async function boot(connection) {
       client.api('GET', '/api/manager/system/').catch(() => ({})),
       loadKeyScopes(),
       loadWidgetModes(),
+      loadWidgetSizes(),
     ]);
     if (!current()) return;
     state.system = system;

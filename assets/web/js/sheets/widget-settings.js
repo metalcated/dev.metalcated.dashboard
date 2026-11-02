@@ -18,6 +18,7 @@ import { NOTE_COLORS } from '../widgets/note.js';
 import { sensorStyle } from '../widgets/sensors.js';
 import { state } from '../state.js';
 import { WIDGET_MODES, canChooseWidgetMode, saveWidgetMode, widgetMode } from '../widget-modes.js';
+import { saveWidgetSize, widgetSize } from '../widget-sizes.js';
 import { zoneIcon, zoneOrder } from '../zones.js';
 
 const MODES = {
@@ -260,6 +261,7 @@ export async function openWidgetSettings(dashboardId, widget, name, { onSave = n
   const savedPicks = toIds(pick ? widget.data?.[pick.key] : null);
   const automaticTitle = definition?.name ?? (widget.titleModified ? null : widget.title) ?? name ?? '';
   const draft = {
+    type: widget.type,
     titleHidden: widget.titleHidden === true,
     title: widget.title ?? '',
     settings: { ...saved },
@@ -267,7 +269,10 @@ export async function openWidgetSettings(dashboardId, widget, name, { onSave = n
     // Other values a built-in widget keeps in its data (a note's colour), by key.
     data: {},
     mode: widgetMode(widget.id),
+    resetWebSize: false,
   };
+  let nativeHeightError = null;
+  let nativeHeightInput;
   // A setting's value: what was chosen, else the app's default.
   const valueOf = (setting) => (setting.id in draft.settings ? draft.settings[setting.id] : (setting.value ?? null));
   const allSettings = () => Object.fromEntries((definition?.settings ?? []).map((setting) => [setting.id, valueOf(setting)]));
@@ -505,6 +510,24 @@ export async function openWidgetSettings(dashboardId, widget, name, { onSave = n
     }
     const settings = section(root, 'Settings');
     renderTitleRows(settings);
+    const variants = isTimeline ? ['notifications_timeline_small', 'notifications_timeline_large']
+      : ['device_speaker_small', 'device_speaker_large'].includes(widget.type) ? ['device_speaker_small', 'device_speaker_large'] : null;
+    if (variants) {
+      const row = el('div', 'ws-row');
+      const label = el('label', 'ws-label', 'Widget size');
+      const select = el('select', 'ws-input');
+      select.setAttribute('aria-label', 'Widget size');
+      for (const [index, type] of variants.entries()) {
+        const option = el('option', null, index === 0 ? 'Compact' : 'Large');
+        option.value = type;
+        select.append(option);
+      }
+      select.value = draft.type;
+      select.addEventListener('change', () => { draft.type = select.value; });
+      row.append(label, select);
+      settings.append(row);
+      hint(root, 'This widget size is shared with the Homey mobile app.');
+    }
     if (widget.type === 'device_camera_live') {
       switchRow(settings, 'Auto start stream', dataValue('autoplay') !== false, (on) => {
         // An omitted value starts automatically too. Returning to the original
@@ -542,6 +565,14 @@ export async function openWidgetSettings(dashboardId, widget, name, { onSave = n
     if (definition && !creating && canChooseWidgetMode()) {
       const group = section(root, 'Web dashboard');
       rowButton(group, 'Runs', MODES[draft.mode].title, () => open(modePage()));
+    }
+    if (!creating) {
+      const size = widgetSize(widget.id);
+      const group = section(root, 'Web size');
+      const reset = rowButton(group, 'Reset web size', draft.resetWebSize ? 'Reset on Save'
+        : size ? 'Custom size' : 'Using native size', () => { draft.resetWebSize = true; show(); });
+      reset.disabled = !size || draft.resetWebSize;
+      hint(root, 'Corner resizing is shared across web browsers. The mobile app keeps its native widget size.');
     }
   };
 
@@ -750,6 +781,27 @@ export async function openWidgetSettings(dashboardId, widget, name, { onSave = n
     group.append(input);
     switchRow(group, 'Allow scrolling', dataValue('scrollEnabled') === true, (on) => { draft.data.scrollEnabled = on; });
     hint(root, 'Some websites do not allow their pages to appear inside a dashboard.');
+    const heightGroup = section(root, 'Height in Homey');
+    const height = el('input', 'ws-input');
+    height.type = 'number';
+    height.min = '80'; height.max = '1440'; height.step = '1';
+    height.setAttribute('aria-label', 'Height in Homey');
+    const existingHeight = dataValue('height');
+    height.value = nativeHeightInput ?? (existingHeight?.type === 1 && Number.isFinite(Number(existingHeight.value)) ? existingHeight.value : '');
+    height.setAttribute('aria-invalid', String(nativeHeightError != null));
+    height.placeholder = 'Keep current height';
+    height.addEventListener('input', () => {
+      nativeHeightInput = String(height.value);
+      const empty = String(height.value).trim() === '';
+      const value = Number(height.value);
+      const valid = empty || (Number.isInteger(value) && value >= 80 && value <= 1440);
+      height.setAttribute('aria-invalid', String(!valid));
+      nativeHeightError = valid ? null : 'Enter a height between 80 and 1440.';
+      if (empty) delete draft.data.height;
+      else if (valid) draft.data.height = { type: 1, value };
+    });
+    heightGroup.append(height);
+    hint(root, 'Sets this web page widget’s height in Homey, including mobile. Leave blank to keep its current height.');
   };
   // Only numbers make a line, as in the app.
   const logs = () => Object.values(state.data.insightsLogs ?? {}).filter((log) => log.type === 'number');
@@ -1092,8 +1144,10 @@ export async function openWidgetSettings(dashboardId, widget, name, { onSave = n
     const picksChanged = pick != null && !sameValue(draft.picks, savedPicks);
     const dataChanged = Object.keys(draft.data).filter((key) => !sameValue(draft.data[key], widget.data?.[key]));
     const modeChanged = !creating && draft.mode !== widgetMode(widget.id);
+    const typeChanged = draft.type !== widget.type;
     // Apply only fields edited here, so edits from another client to unrelated settings survive.
     const apply = (target) => {
+      if (typeChanged) target.type = draft.type;
       if (draft.titleHidden !== (widget.titleHidden === true)) target.titleHidden = draft.titleHidden;
       if (title !== (widget.title ?? '')) {
         target.title = title || (definition?.name ?? null);
@@ -1103,7 +1157,11 @@ export async function openWidgetSettings(dashboardId, widget, name, { onSave = n
       if (changed.length > 0) {
         target.data.settings = { ...(target.data.settings ?? {}), ...Object.fromEntries(changed.map((id) => [id, draft.settings[id]])) };
       }
-      for (const key of dataChanged) target.data[key] = draft.data[key];
+      for (const key of dataChanged) {
+        if (key === 'height' && widget.type === 'web_frame') {
+          target.data.height = { ...(target.data.height ?? {}), type: 1, value: draft.data.height.value };
+        } else target.data[key] = draft.data[key];
+      }
       if (picksChanged) {
         target.data[pick.key] = pick.scalar ? (draft.picks[0] ?? null) : [...draft.picks];
         const item = KINDS[pick.kind].items().find((candidate) => candidate.id === draft.picks[0]);
@@ -1118,6 +1176,7 @@ export async function openWidgetSettings(dashboardId, widget, name, { onSave = n
     try {
       if (!current()) throw new Error('This connection changed. Reopen the widget settings.');
       if (!canEditDashboards()) throw new Error(NO_EDIT_PERMISSION);
+      if (nativeHeightError) throw new Error(nativeHeightError);
       if (widget.type === 'web_frame' && (creating || dataChanged.includes('url'))) {
         let address;
         try { address = new URL(dataValue('url')); } catch { /* Show the same validation below. */ }
@@ -1135,11 +1194,12 @@ export async function openWidgetSettings(dashboardId, widget, name, { onSave = n
         if (widget.type === 'insights_chart_line' && !created.data.logId) throw new Error('Select an Insight before adding this widget.');
         if (typeof onSave !== 'function') throw new Error('This widget cannot be added in this view.');
         await onSave(created);
-      } else if (titleChanged || changed.length > 0 || picksChanged || dataChanged.length > 0) {
+      } else if (typeChanged || titleChanged || changed.length > 0 || picksChanged || dataChanged.length > 0) {
         await updateDashboard(dashboardId, (columns) => apply(locateWidget(columns, widget.id).widget));
       }
       if (!current()) return;
       if (modeChanged) await saveWidgetMode(widget.id, draft.mode);
+      if (draft.resetWebSize) await saveWidgetSize(widget.id, null);
       dialog.close();
     } catch (error) {
       if (!current()) {

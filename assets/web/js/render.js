@@ -7,6 +7,7 @@ import { $, el, note } from './dom.js';
 import { addColumnTools, addEditTools } from './edit-mode.js';
 import { fitBoard } from './fit.js';
 import { state } from './state.js';
+import { applyWidgetSize } from './widget-sizes.js';
 import { WIDGETS, widgetTypeName } from './widgets/index.js';
 
 // The board's widgets by id: the settings each was drawn with, its section and its cleanup. A highlight can lift one
@@ -88,7 +89,8 @@ function arrange(parent, sections) {
   }
   const stay = new Set();
   for (let i = best.indexOf(Math.max(...best)); i >= 0 && best[i] >= 0; i = previous[i]) stay.add(sections[i]);
-  let next = parent.querySelector('.column-add-widget');
+  const add = parent.querySelector('.column-add-widget');
+  let next = add?.parentNode === parent ? add : null;
   for (let i = sections.length - 1; i >= 0; i -= 1) {
     if (!stay.has(sections[i])) place(parent, sections[i], next);
     next = sections[i];
@@ -152,13 +154,25 @@ export function updateBoard() {
   const widgets = columns.flatMap((column) => column.widgets);
   const unloaded = widgets.flatMap((widget) => WIDGETS[widget.type]?.needs ?? [])
     .some((key) => state.data[key] == null && state.dataErrors[key] == null);
-  if (held || dashboard == null || dashboard.id !== drawnDashboardId || columns.length !== columnNodes.length
-      || columns.some((column, index) => column.id !== columnIds[index]) || unloaded) {
+  if (held || dashboard == null || dashboard.id !== drawnDashboardId || unloaded) {
     renderDashboard();
     return;
   }
   $('dashboard-name').textContent = dashboard.name;
   document.title = `${dashboard.name} · Homey`;
+
+  // Keep live sections mounted while columns change. Retire a column only after its widgets have moved.
+  const previousColumns = [...columnNodes];
+  if (columns.length !== columnNodes.length || columns.some((column, index) => column.id !== columnIds[index])) {
+    const byId = new Map(columnIds.map((id, index) => [id, columnNodes[index]]));
+    columnNodes = columns.map((column) => {
+      const node = byId.get(column.id) ?? el('div', 'column');
+      if (!node.parentNode) $('board').append(node);
+      return node;
+    });
+    columnIds = columns.map((column) => column.id);
+  }
+  for (const [index, column] of columns.entries()) addColumnTools(columnNodes[index], dashboard.id, column.id);
 
   const shown = new Set(widgets.map((widget) => widget.id));
   for (const [id, entry] of drawn) {
@@ -175,7 +189,16 @@ export function updateBoard() {
       next = drawn.get(widget.id).section;
     }
   }
+  for (const node of previousColumns) if (!columnNodes.includes(node)) node.remove();
+  arrange($('board'), columnNodes);
   fitBoard();
+}
+
+// Display-size updates never remount widgets or camera/app frames.
+export function refreshWidgetSizes(ids) {
+  for (const [id, entry] of drawn) {
+    if (ids == null || ids.includes(id)) applyWidgetSize(entry.section, id);
+  }
 }
 
 // Draws these widgets again in their place, e.g. after the way an app widget runs changed (widget-modes.js).
@@ -192,9 +215,12 @@ export function redrawWidgets(ids) {
 // Also used for the highlight. Returns the widget's section and its cleanup, if it has one.
 export function renderWidget(widget, parent, before = null) {
   const section = el('section', 'widget');
+  section.dataset.widgetId = widget.id;
+  section.dataset.dashboardId = state.dashboardId;
   const titleNode = el('h2', 'widget-title');
   const body = el('div', 'widget-body');
   section.append(titleNode, body);
+  applyWidgetSize(section, widget.id);
   // Attach first: an iframe only gets a contentWindow once it is in the document.
   parent.insertBefore(section, before);
 

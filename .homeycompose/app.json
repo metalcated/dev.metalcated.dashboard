@@ -1,6 +1,6 @@
 {
   "id": "dev.schweiger.dashboard",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "compatibility": ">=13.0.0",
   "sdk": 3,
   "platforms": [
@@ -108,6 +108,15 @@
     "setWidgetMode": {
       "method": "PUT",
       "path": "/widget-modes/:id",
+      "public": true
+    },
+    "getWidgetSizes": {
+      "method": "GET",
+      "path": "/widget-sizes"
+    },
+    "setWidgetSize": {
+      "method": "PUT",
+      "path": "/widget-sizes/:id",
       "public": true
     },
     "connectWorkspace": {

@@ -283,6 +283,35 @@ dialog.dashboard-create { width: min(480px, calc(100vw - 32px)); padding: 26px; 
 .widget-picker-item svg { flex: none; }
 .widget-picker-list .ws-section { margin-top: 24px; }
 .ws-save-error { margin: 12px 20px 0; color: var(--danger); }
+.layout-edit-hint { display: none; margin: 0; padding: 0 16px 18px; max-width: 900px; color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
+.editing .layout-edit-hint { display: block; }
+.column-edit-tools { display: none; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 34px; }
+.editing .column-edit-tools { display: flex; }
+.column-edit-label { color: var(--text-secondary); font-size: 13px; font-weight: 600; }
+.column-edit-tools .column-remove { padding: 7px 11px; border: 0; border-radius: 999px; background: var(--control); color: var(--text-primary); font: inherit; font-size: 12px; cursor: pointer; }
+.column-edit-tools .column-remove:disabled { opacity: 0.35; cursor: default; }
+dialog.column-remove [hidden] { display: none !important; }
+.editing .column { padding: 12px; border: 1px dashed var(--tile-border); border-radius: 24px; background: color-mix(in srgb, var(--tile) 24%, transparent); transition: border-color var(--motion-micro); }
+.widget-drag-handle, .widget-resize-handle { display: none; }
+.editing .board .widget :is(.widget-drag-handle, .widget-resize-handle) { position: absolute; z-index: 4; display: grid; place-items: center; padding: 0; border: 0; background: var(--control); color: var(--text-primary); touch-action: none; user-select: none; }
+.editing .board .widget .widget-drag-handle { top: 9px; left: 10px; width: 32px; height: 32px; border-radius: 50%; cursor: grab; }
+.widget-drag-handle svg { width: 20px; height: 20px; }
+.editing .board .widget .widget-resize-handle { right: 4px; bottom: 4px; width: 32px; height: 32px; border-radius: 12px 0 14px 0; cursor: nwse-resize; font-size: 19px; }
+.widget-drag-handle:focus-visible, .widget-resize-handle:focus-visible, .column-edit-tools button:focus-visible { outline: 2px solid var(--shortcut); outline-offset: 3px; }
+.editing .column.is-layout-drop-target { border-color: var(--shortcut); }
+.widget.is-layout-dragging { opacity: 0.55; }
+.widget.is-layout-resizing { outline: 2px solid var(--shortcut); outline-offset: 2px; }
+.layout-drag-active, .layout-resize-active { user-select: none; }
+.layout-drag-active .widget-drag-handle { cursor: grabbing !important; }
+.layout-drag-ghost, .layout-resize-ghost, .layout-resize-label { position: fixed; z-index: 9998; max-width: min(320px, calc(100vw - 24px)); padding: 12px 18px; border: 1px solid var(--shortcut); border-radius: 14px; background: var(--panel); color: var(--text-primary); box-shadow: var(--shadow); pointer-events: none; font-size: 14px; font-weight: 600; }
+.layout-drop-marker { position: fixed; z-index: 9997; height: 4px; border-radius: 4px; background: var(--shortcut); pointer-events: none; }
+.layout-drop-marker[hidden], .layout-drag-ghost[hidden], .layout-resize-ghost[hidden], .layout-resize-label[hidden] { display: none; }
+.layout-drag-status, .layout-resize-status { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.widget.has-web-size:not(.highlight) { width: var(--web-widget-width, 100%); max-width: 100%; }
+.widget.has-web-size:not(.highlight) > .widget-body { aspect-ratio: var(--web-widget-ratio); min-height: 0; overflow: auto; }
+.widget.has-web-size:not(.highlight) > .widget-body > :is(.camera-live, .snapshot, .web-frame, .app-frame) { width: 100%; height: 100%; min-height: 0; aspect-ratio: auto; }
+.widget.has-web-size:not(.highlight) :is(.camera-live video, .snapshot img) { width: 100%; height: 100%; aspect-ratio: auto; object-fit: contain; }
+.widget.has-web-size:not(.highlight) .app-frame > .widget-frame { height: 100% !important; aspect-ratio: auto !important; }
 @media (min-width: 1040px) {
   .has-dashboard-navigation .dashboard-new-button { display: none; }
 }

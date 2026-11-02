@@ -38,7 +38,7 @@ export function openNewDashboard(onCreated) {
     option.value = dashboard.id;
     source.append(option);
   }
-  const copyHint = el('p', 'dashboard-create-hint', 'Copies the layout and widget settings. Notes and app widget saved content start fresh.');
+  const copyHint = el('p', 'dashboard-create-hint', 'Copies the layout and widget settings. Note text, app widget saved content, and web-only sizes start fresh.');
   copyHint.hidden = true;
   source.addEventListener('change', () => { copyHint.hidden = !source.value; });
   const error = el('p', 'dashboard-create-error');

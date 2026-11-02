@@ -77,4 +77,12 @@ module.exports = {
   async setWidgetMode({ homey, params, body }) {
     return homey.app.setWidgetMode(params.id, body ?? {});
   },
+
+  async getWidgetSizes({ homey }) {
+    return homey.app.widgetSizes();
+  },
+
+  async setWidgetSize({ homey, params, body }) {
+    return homey.app.setWidgetSize(params.id, body ?? {});
+  },
 };

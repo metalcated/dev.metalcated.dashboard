@@ -162,7 +162,7 @@ test('copy submits the selected native dashboard identity and explains the separ
   form.source.value = 'cameras';
   await form.source.emit('change').completion;
   assert.equal(form.hint.hidden, false);
-  assert.match(form.hint.textContent, /Notes and app widget saved content start fresh/);
+  assert.match(form.hint.textContent, /Note text, app widget saved content, and web-only sizes start fresh/);
   await form.form.emit('submit').completion;
   assert.deepEqual(view.calls, [{ name: 'My cameras', sourceId: 'cameras' }]);
   assert.deepEqual(view.selected, [saved]);
