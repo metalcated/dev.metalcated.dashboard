@@ -566,3 +566,19 @@ test('reconnecting after a temporary relay outage refreshes native dashboards on
   assert.equal(relay.callbacks.reconnects, 1);
   relay.realtime.close();
 });
+
+test('unavailable device snapshots report an error while manager events keep flowing and recover without a board reset', async () => {
+  let calls = 0;
+  const seen = [];
+  const relay = await relayHarness(async () => ({ cursor: `epoch:${++calls}`,
+    ...(calls === 1 ? { deviceUpdatesAvailable: false } : {}),
+    events: [{ uri: 'homey:manager:dashboards', event: 'dashboard.update', data: { id: 'board' } }],
+  }));
+  relay.realtime.on('homey:manager:dashboards', 'dashboard.update', data => seen.push(data.id));
+  await relay.next();
+  await relay.next();
+  assert.deepEqual(relay.statuses, ['error', 'live']);
+  assert.deepEqual(seen, ['board', 'board']);
+  assert.equal(relay.callbacks.reconnects, 0, 'snapshot recovery sends changed values without remounting the board');
+  relay.realtime.close();
+});

@@ -119,7 +119,8 @@ function createBrokerRealtime(client, { onStatus, onReconnect, onUnauthorized })
       const resync = result?.reset === true || (connectedBefore && offline);
       connectedBefore = true;
       offline = false;
-      onStatus('live', 'Live');
+      if (result?.deviceUpdatesAvailable === false) onStatus('error', 'Device updates unavailable');
+      else onStatus('live', 'Live');
       if (resync) onReconnect();
       for (const data of result?.events ?? []) {
         for (const listener of [...listeners]) {

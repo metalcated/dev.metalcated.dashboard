@@ -1,4 +1,7 @@
 {
+  "1.7.2": {
+    "en": "Keep sensor values live on Homey versions that do not forward device events to apps. Active dashboard views share a bounded five-second check of current device values; changed readings update in place while charts and widgets stay mounted."
+  },
   "1.7.1": {
     "en": "Keep live subscriptions separate for each open dashboard view, so multiple tabs in the same browser can update sensors and charts without repeatedly rebuilding the dashboard. Existing browser connections and native mobile dashboards are preserved."
   },

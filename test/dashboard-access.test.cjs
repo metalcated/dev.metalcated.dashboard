@@ -704,6 +704,176 @@ test('total active views stay bounded across approved sessions', async () => {
   await f.access.close();
 });
 
+const deviceSubscription = { uri: 'homey:device:sensor-1', event: 'capability' };
+const deviceReadCount = f => f.calls.filter(call => new URL(call.url).pathname === '/api/manager/devices/device').length;
+const deviceReadings = capabilitiesObj => ({ 'sensor-1': { id: 'sensor-1', capabilitiesObj } });
+const jsonResponse = data => ({ ok: true, status: 200, json: async () => clone(data) });
+
+test('quiet SDK device topics receive only changed snapshot values, including zero, false and null', async () => {
+  const f = fixture();
+  const { token } = f.access.issue({ screenId: SCREEN });
+  const subscriptions = [deviceSubscription];
+  f.data['/api/manager/devices/device'] = deviceReadings({ reading: { value: 1 }, alarm: { value: true }, nullable: { value: 2 } });
+  let result = await f.access.events({ token, subscriptions });
+  assert.deepEqual(result.events, []);
+  assert.equal(f.access.sequence, 0, 'initial readings seed a cache instead of filling the bounded event buffer');
+  f.data['/api/manager/devices/device'] = deviceReadings({ reading: { value: 0 }, alarm: { value: false }, nullable: { value: null } });
+  f.advance(4999);
+  result = await f.access.events({ token, subscriptions, cursor: result.cursor });
+  assert.deepEqual(result.events, []);
+  assert.equal(deviceReadCount(f), 1);
+  f.advance(1);
+  result = await f.access.events({ token, subscriptions, cursor: result.cursor });
+  assert.deepEqual(result.events.map(event => event.data), [
+    { capabilityId: 'reading', value: 0 }, { capabilityId: 'alarm', value: false }, { capabilityId: 'nullable', value: null },
+  ]);
+  assert.equal(result.reset, undefined);
+  for (const capability of Object.values(f.data['/api/manager/devices/device']['sensor-1'].capabilitiesObj)) capability.lastUpdated = 'new timestamp only';
+  f.advance(5000);
+  result = await f.access.events({ token, subscriptions, cursor: result.cursor });
+  assert.deepEqual(result.events, [], 'metadata-only refreshes do not manufacture new readings');
+  await f.access.events({ token, subscriptions: [], cursor: result.cursor });
+  f.advance(5000);
+  await f.access.events({ token, subscriptions: [], cursor: result.cursor });
+  assert.equal(deviceReadCount(f), 3, 'reads stop once no device topics remain');
+  await f.access.close();
+});
+
+test('a reading that first becomes available after seeding reaches the existing capability object', async () => {
+  const f = fixture();
+  const { token } = f.access.issue({ screenId: SCREEN });
+  const subscriptions = [deviceSubscription];
+  f.data['/api/manager/devices/device'] = deviceReadings({ missing: { value: undefined }, invalid: { value: {} } });
+  const start = await f.access.events({ token, subscriptions });
+  assert.equal(f.access.sequence, 0);
+  f.data['/api/manager/devices/device'] = deviceReadings({ missing: { value: 0 }, invalid: { value: null } });
+  f.advance(5000);
+  const result = await f.access.events({ token, subscriptions, cursor: start.cursor });
+  assert.deepEqual(result.events.map(event => event.data), [{ capabilityId: 'missing', value: 0 }, { capabilityId: 'invalid', value: null }]);
+  await f.access.close();
+});
+
+test('seeding 86 battery topics does not overflow event history and a later single change stays incremental', async () => {
+  const f = fixture();
+  const { token } = f.access.issue({ screenId: SCREEN });
+  const subscriptions = Array.from({ length: 86 }, (_, i) => ({ uri: `homey:device:sensor-${i}`, event: 'capability' }));
+  f.data['/api/manager/devices/device'] = Object.fromEntries(Array.from({ length: 86 }, (_, i) => [`sensor-${i}`, {
+    capabilitiesObj: Object.fromEntries(Array.from({ length: 8 }, (_, capability) => [`reading-${capability}`, { value: 50 }])),
+  }]));
+  const start = await f.access.events({ token, subscriptions });
+  assert.equal(deviceReadCount(f), 1);
+  assert.equal(f.access.sequence, 0, '688 initial values never become a replay burst');
+  f.data['/api/manager/devices/device']['sensor-0'].capabilitiesObj['reading-0'].value = 49;
+  f.advance(5000);
+  const result = await f.access.events({ token, subscriptions, cursor: start.cursor });
+  assert.equal(result.reset, undefined);
+  assert.deepEqual(result.events, [{ uri: 'homey:device:sensor-0', event: 'capability', data: { capabilityId: 'reading-0', value: 49 } }]);
+  await f.access.close();
+});
+
+test('simultaneous views coalesce one device read and do not read more than once per five seconds', async () => {
+  const f = fixture();
+  const { token } = f.access.issue({ screenId: SCREEN });
+  let finish;
+  f.respond(() => new Promise(resolve => { finish = resolve; }));
+  const first = f.access.events({ token, pollerId: 'a'.repeat(32), subscriptions: [deviceSubscription] });
+  const second = f.access.events({ token, pollerId: 'b'.repeat(32), subscriptions: [deviceSubscription] });
+  for (let i = 0; i < 30 && !finish; i += 1) await Promise.resolve();
+  assert.equal(deviceReadCount(f), 1);
+  finish(jsonResponse(deviceReadings({ reading: { value: 10 } })));
+  await Promise.all([first, second]);
+  assert.equal(deviceReadCount(f), 1);
+  await f.access.events({ token, pollerId: 'a'.repeat(32), subscriptions: [deviceSubscription] });
+  assert.equal(deviceReadCount(f), 1);
+  await f.access.close();
+});
+
+test('device snapshot errors retain readings, bound retries, and keep manager events flowing without false freshness', async () => {
+  const f = fixture();
+  const errors = [];
+  f.app.error = error => errors.push(error);
+  const { token } = f.access.issue({ screenId: SCREEN });
+  const manager = { uri: 'homey:manager:dashboards', event: 'dashboard.update' };
+  const subscriptions = [deviceSubscription, manager];
+  f.data['/api/manager/devices/device'] = deviceReadings({ reading: { value: 10 } });
+  const start = await f.access.events({ token, subscriptions });
+  f.data['/api/manager/devices/device'] = deviceReadings({ reading: { value: 11 } });
+  f.respond(() => ({ ok: false, status: 503, json: async () => ({ error: 'Temporarily unavailable' }) }));
+  f.advance(5000);
+  f.topics.get(manager.uri).emit('realtime', manager.event, { id: 'board', name: 'Still live' });
+  let result = await f.access.events({ token, subscriptions, cursor: start.cursor });
+  assert.equal(result.deviceUpdatesAvailable, false);
+  assert.equal(result.events[0].data.name, 'Still live');
+  assert.equal(f.access.topics.get(deviceSubscription.uri).deviceValues.get('reading'), 10);
+  assert.equal(errors.length, 1);
+  f.advance(1000);
+  await f.access.events({ token, subscriptions, cursor: result.cursor });
+  assert.equal(deviceReadCount(f), 2);
+  const managerOnly = await f.access.events({ token, pollerId: 'b'.repeat(32), subscriptions: [manager] });
+  assert.equal(managerOnly.deviceUpdatesAvailable, undefined, 'another view’s device failure does not mark a manager-only view unavailable');
+  f.respond(null);
+  f.advance(4000);
+  result = await f.access.events({ token, subscriptions, cursor: result.cursor });
+  assert.equal(result.deviceUpdatesAvailable, undefined);
+  assert.equal(result.reset, undefined);
+  assert.deepEqual(result.events.map(event => event.data), [{ capabilityId: 'reading', value: 11 }]);
+  assert.equal(errors.length, 1, 'one outage emits one redacted diagnostic instead of repeated log noise');
+  await f.access.close();
+});
+
+test('an SDK push received during a snapshot prevents the older read from rolling values back', async () => {
+  const f = fixture();
+  const { token } = f.access.issue({ screenId: SCREEN });
+  const subscriptions = [deviceSubscription];
+  f.data['/api/manager/devices/device'] = deviceReadings({ reading: { value: 10 } });
+  const start = await f.access.events({ token, subscriptions });
+  let finish;
+  f.respond(() => new Promise(resolve => { finish = resolve; }));
+  f.advance(5000);
+  const polling = f.access.events({ token, subscriptions, cursor: start.cursor });
+  for (let i = 0; i < 30 && !finish; i += 1) await Promise.resolve();
+  f.topics.get(deviceSubscription.uri).emit('realtime', 'capability', { capabilityId: 'reading', value: 12 });
+  finish(jsonResponse(deviceReadings({ reading: { value: 11 } })));
+  const result = await polling;
+  assert.deepEqual(result.events.map(event => event.data), [{ capabilityId: 'reading', value: 12 }]);
+  assert.equal(f.access.topics.get(deviceSubscription.uri).deviceValues.get('reading'), 12);
+  f.respond(null);
+  f.data['/api/manager/devices/device'] = deviceReadings({ reading: { value: 12 } });
+  f.advance(5000);
+  assert.deepEqual((await f.access.events({ token, subscriptions, cursor: result.cursor })).events, []);
+  await f.access.close();
+});
+
+test('late device reads cannot publish after unsubscribe, expiry, revocation, credential change or shutdown', async () => {
+  for (const change of ['unsubscribe', 'expiry', 'revoke', 'credential', 'close']) {
+    const f = fixture();
+    const { token } = f.access.issue({ screenId: SCREEN });
+    const subscriptions = [deviceSubscription];
+    f.data['/api/manager/devices/device'] = deviceReadings({ reading: { value: 10 } });
+    const start = await f.access.events({ token, subscriptions });
+    let finish;
+    f.respond(() => new Promise(resolve => { finish = resolve; }));
+    f.advance(5000);
+    const polling = f.access.events({ token, subscriptions, cursor: start.cursor });
+    for (let i = 0; i < 30 && !finish; i += 1) await Promise.resolve();
+    let closing;
+    if (change === 'unsubscribe') await f.access.events({ token, subscriptions: [], cursor: start.cursor });
+    if (change === 'expiry') { f.advance(DAY); await f.tickTimers(); }
+    if (change === 'revoke') await f.access.revokeScreen(SCREEN);
+    if (change === 'credential') f.homey.settings.set('apiKey', 'replacement-credential');
+    if (change === 'close') closing = f.access.close();
+    const outcome = polling.then(value => ({ value }), error => ({ error }));
+    finish(jsonResponse(deviceReadings({ reading: { value: 11 } })));
+    const result = await outcome;
+    if (['expiry', 'revoke'].includes(change)) assert.equal(result.error?.status, 401);
+    else if (change === 'close') assert.equal(result.error?.status, 503);
+    else assert.deepEqual(result.value.events, []);
+    assert.equal(f.access.sequence, 0, `the ${change} boundary rejects the stale reading`);
+    if (closing) await closing;
+    await f.access.close();
+  }
+});
+
 test('shutdown awaits owned API unregister calls, handles failures, and releases an in-flight registration', async () => {
   const f = fixture();
   const { token } = f.access.issue({ screenId: SCREEN });
@@ -733,7 +903,7 @@ test('shutdown awaits owned API unregister calls, handles failures, and releases
   await started;
   const closing = pending.access.close();
   provideApi(api);
-  await Promise.all([polling, closing]);
+  await Promise.all([assert.rejects(polling, denied(503)), closing]);
   assert.equal(unregisters, 1);
   assert.equal(api.listenerCount('realtime'), 0);
   await assert.rejects(pending.access.events({ token: issued.token, subscriptions: [] }), denied(503));
