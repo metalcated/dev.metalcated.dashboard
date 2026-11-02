@@ -1,12 +1,13 @@
 // Edit mode, as in the Homey app: the Edit button turns it on (not in kiosk mode), and each widget gets a menu (•••)
 // to move it, open its settings (sheets/widget-settings.js) or remove it. Each change is saved to the Homey straight
-// away (dashboard-save.js), so Done only leaves edit mode. Adding and replacing widgets is left to the Homey app.
+// away (dashboard-save.js), so Done only leaves edit mode. New widgets start as unsaved settings drafts.
 
-import { NO_EDIT_PERMISSION, canEditDashboards, locateWidget, updateDashboard } from './dashboard-save.js';
+import { NO_EDIT_PERMISSION, addDashboardColumn, canEditDashboards, locateWidget, updateDashboard } from './dashboard-save.js';
 import { $, el, toast } from './dom.js';
 import { CHEVRON_DOWN, CHEVRON_LEFT, CHEVRON_RIGHT, CHEVRON_UP, EDIT_ICON, MORE_ICON, TRASH_ICON } from './icons.js';
 import { isKiosk } from './kiosk.js';
 import { openWidgetSettings } from './sheets/widget-settings.js';
+import { openWidgetPicker } from './sheets/widget-picker.js';
 import { state } from './state.js';
 
 let menu = null; // The open widget menu, if any.
@@ -136,7 +137,33 @@ export function addEditTools(section, widget) {
   section.append(layer);
 }
 
+export function addColumnTools(columnNode, dashboardId, columnId) {
+  const add = el('button', 'column-add-widget', '＋ Add widget');
+  add.type = 'button';
+  add.setAttribute('aria-label', 'Add widget');
+  add.addEventListener('click', () => {
+    if (!canEditDashboards()) return toast(NO_EDIT_PERMISSION);
+    openWidgetPicker(dashboardId, columnId);
+  });
+  columnNode.append(add);
+}
+
 export function initEditMode() {
+  let addingColumn = false;
+  $('add-column-button').addEventListener('click', async () => {
+    if (addingColumn || !isEditing() || !state.dashboardId) return;
+    if (!canEditDashboards()) return toast(NO_EDIT_PERMISSION);
+    addingColumn = true;
+    $('add-column-button').disabled = true;
+    try {
+      await addDashboardColumn(state.dashboardId);
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      addingColumn = false;
+      $('add-column-button').disabled = false;
+    }
+  });
   $('edit-button').addEventListener('click', () => {
     if (isEditing()) return setEditing(false);
     if (!canEditDashboards()) return toast(NO_EDIT_PERMISSION);

@@ -10,6 +10,7 @@ const sources = new Map(await Promise.all(['sheets/widget-settings.js', 'dashboa
 
 class Element {
   constructor(tag = 'div', className = '', text = '') {
+    className ??= '';
     this.tagName = tag; this.className = className; this._text = text; this.children = []; this.attributes = new Map();
     this.listeners = new Map(); this.style = {}; this.dataset = {}; this.open = false; this.hidden = false;
     const classes = new Set(className.split(/\s+/).filter(Boolean));
@@ -80,7 +81,7 @@ async function harness({ autoplay = false, omitAutoplay = false, type = 'device_
     createOffer() { return new Promise(() => {}); }
     close() { this.closed = true; }
   }
-  const context = vm.createContext({ document, structuredClone, console, AbortController, RTCPeerConnection: Peer,
+  const context = vm.createContext({ document, structuredClone, console, URL, AbortController, RTCPeerConnection: Peer,
     CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } },
     setTimeout: (fn, delay) => { const id = ++timerId; timers.set(id, { fn, delay }); return id; }, clearTimeout: id => timers.delete(id),
     setInterval: (fn, delay) => { const id = ++timerId; timers.set(id, { fn, delay }); return id; }, clearInterval: id => timers.delete(id),
@@ -112,8 +113,8 @@ async function harness({ autoplay = false, omitAutoplay = false, type = 'device_
     get server() { return server; },
     deny(value) { denied = value; },
     editServer(mutate) { mutate(server); },
-    async open() {
-      await editor.openWidgetSettings('board', state.dashboards.board.columns[0].widgets[0], 'Office');
+    async open(options) {
+      await editor.openWidgetSettings('board', state.dashboards.board.columns[0].widgets[0], 'Office', options);
       return document.querySelector('dialog.widget-settings');
     },
     control(dialog, label) { return dialog.find(node => node.getAttribute('aria-label') === label); },
@@ -219,4 +220,135 @@ test('a refused save keeps the camera draft open and a later authorized retry sa
   await h.control(dialog, 'Save').click();
   assert.equal(dialog.open, false);
   assert.equal(h.server.columns[0].widgets[0].data.autoplay, true);
+});
+
+test('a new widget stays an unsaved draft until Add widget and cancel creates nothing', async () => {
+  const view = await harness();
+  const created = [];
+  const options = { creating: true, actionLabel: 'Add widget', onSave: async widget => created.push(clone(widget)) };
+  const cancelled = await view.open(options);
+  await view.control(cancelled, 'Auto start stream').click();
+  assert.equal(created.length, 0);
+  assert.equal(view.calls.length, 0);
+  await view.control(cancelled, 'Close').click();
+  assert.equal(created.length, 0);
+
+  const dialog = await view.open(options);
+  await view.control(dialog, 'Auto start stream').click();
+  await view.control(dialog, 'Add widget').click();
+  assert.equal(created.length, 1);
+  assert.equal(created[0].data.autoplay, true);
+  assert.equal(created[0].data.deviceId, 'office');
+  assert.equal(created[0].data.deviceVideoId, 'live');
+  assert.deepEqual(created[0].data.mobileOption, { keep: true });
+  assert.equal(view.calls.length, 0, 'draft editor delegates one add rather than updating a missing widget');
+  assert.equal(dialog.open, false);
+});
+
+test('new widget validation refuses an unconfigured camera without creating anything', async () => {
+  const view = await harness();
+  delete view.state.dashboards.board.columns[0].widgets[0].data.deviceId;
+  let added = 0;
+  const dialog = await view.open({ creating: true, actionLabel: 'Add widget', onSave: async () => { added += 1; } });
+  await view.control(dialog, 'Add widget').click();
+  assert.equal(added, 0);
+  assert.equal(dialog.open, true);
+  assert.match(view.toasts.at(-1), /Select a camera/);
+});
+
+test('a new widget refuses a failed add, retains its draft, and prevents duplicate clicks while saving', async () => {
+  const view = await harness();
+  let attempts = 0, complete;
+  const dialog = await view.open({ creating: true, actionLabel: 'Add widget', onSave: async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('The selected column no longer exists.');
+    await new Promise(resolve => { complete = resolve; });
+  } });
+  await view.control(dialog, 'Auto start stream').click();
+  const add = view.control(dialog, 'Add widget');
+  await add.click();
+  assert.equal(dialog.open, true);
+  assert.equal(view.control(dialog, 'Auto start stream').getAttribute('aria-checked'), 'true');
+  assert.match(view.toasts.at(-1), /column no longer exists/);
+  const saving = add.click();
+  await add.click();
+  assert.equal(attempts, 2);
+  assert.equal(add.disabled, true);
+  await view.control(dialog, 'Close').click();
+  await dialog.click();
+  let escapePrevented = false;
+  await dialog.emit('cancel', { preventDefault: () => { escapePrevented = true; } });
+  assert.equal(escapePrevented, true);
+  assert.equal(dialog.open, true, 'pending Add cannot look like a cancelled operation');
+  complete();
+  await saving;
+  assert.equal(dialog.open, false);
+});
+
+test('a connection changed while the draft is open cannot receive its widget', async () => {
+  const view = await harness();
+  let added = 0;
+  const dialog = await view.open({ creating: true, actionLabel: 'Add widget', onSave: async () => { added += 1; } });
+  view.state.client = { api() { assert.fail('must not save to a replacement connection'); } };
+  await view.control(dialog, 'Add widget').click();
+  assert.equal(added, 0);
+  assert.equal(dialog.open, false);
+});
+
+test('saving an unrelated camera choice preserves an unavailable native source instead of replacing it', async () => {
+  const view = await harness();
+  view.state.dashboards.board.columns[0].widgets[0].data.deviceVideoId = 'previous-source';
+  view.editServer(server => { server.columns[0].widgets[0].data.deviceVideoId = 'previous-source'; });
+  const dialog = await view.open();
+  await view.control(dialog, 'Auto start stream').click();
+  await view.control(dialog, 'Save').click();
+  assert.equal(view.server.columns[0].widgets[0].data.deviceVideoId, 'previous-source');
+});
+
+test('changing the camera picks its registered video source and preserves unrelated native fields', async () => {
+  const view = await harness();
+  view.state.data.devices.other = { id: 'other', name: 'Other camera', videos: [{ id: 'second', title: 'Second stream' }] };
+  const dialog = await view.open();
+  await dialog.find(node => node.tagName === 'button' && node.className.includes('ws-item') && node.textContent.includes('Office camera')).click();
+  await dialog.find(node => node.tagName === 'button' && node.className.includes('ws-tile') && node.textContent.includes('Other camera')).click();
+  await view.control(dialog, 'Done').click();
+  assert.equal(view.control(dialog, 'Video source').value, 'second');
+  await view.control(dialog, 'Save').click();
+  const data = view.server.columns[0].widgets[0].data;
+  assert.equal(data.deviceId, 'other');
+  assert.equal(data.deviceVideoId, 'second');
+  assert.deepEqual(data.mobileOption, { keep: true });
+});
+
+test('a new web frame requires a safe web address and saves the configured address in native data', async () => {
+  const view = await harness({ type: 'web_frame' });
+  const added = [];
+  const dialog = await view.open({ creating: true, actionLabel: 'Add widget', onSave: async widget => added.push(clone(widget)) });
+  const address = view.control(dialog, 'Web page address');
+  address.value = 'javascript:alert(1)';
+  await address.emit('input');
+  await view.control(dialog, 'Add widget').click();
+  assert.equal(added.length, 0);
+  assert.equal(dialog.open, true);
+  address.value = 'https://example.com/dashboard';
+  await address.emit('input');
+  await view.control(dialog, 'Add widget').click();
+  assert.equal(added.length, 1);
+  assert.equal(added[0].data.url, 'https://example.com/dashboard');
+});
+
+test('editing an existing web address uses the same validation without altering unrelated native fields', async () => {
+  const view = await harness({ type: 'web_frame' });
+  const dialog = await view.open();
+  const address = view.control(dialog, 'Web page address');
+  address.value = 'https://name:password@example.com';
+  await address.emit('input');
+  await view.control(dialog, 'Save').click();
+  assert.equal(view.calls.length, 0);
+  assert.equal(dialog.open, true);
+  address.value = 'https://example.com';
+  await address.emit('input');
+  await view.control(dialog, 'Save').click();
+  assert.equal(view.server.columns[0].widgets[0].data.url, 'https://example.com');
+  assert.deepEqual(view.server.columns[0].widgets[0].data.mobileOption, { keep: true });
 });

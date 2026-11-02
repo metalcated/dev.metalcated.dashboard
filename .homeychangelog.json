@@ -1,4 +1,7 @@
 {
+  "1.6.0": {
+    "en": "Create native Homey dashboards from the web, starting blank or copying a layout. Add columns and built-in or app widgets with a searchable picker and settings drafts that save only when confirmed. Shared layouts appear in the Homey mobile apps; a lost creation response is checked before another request is sent."
+  },
   "1.0.0": {
     "en": "First release: your Homey dashboards in any browser, with browser pairing and kiosk mode."
   },

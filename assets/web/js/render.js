@@ -4,7 +4,7 @@
 
 import { loadData } from './data.js';
 import { $, el, note } from './dom.js';
-import { addEditTools } from './edit-mode.js';
+import { addColumnTools, addEditTools } from './edit-mode.js';
 import { fitBoard } from './fit.js';
 import { state } from './state.js';
 import { WIDGETS, widgetTypeName } from './widgets/index.js';
@@ -14,6 +14,7 @@ import { WIDGETS, widgetTypeName } from './widgets/index.js';
 const drawn = new Map();
 let drawnDashboardId = null;
 let columnNodes = [];
+let columnIds = [];
 
 // Key order doesn't matter: Homey's answer to a change and its later announcement needn't list keys alike.
 function sameJson(a, b) {
@@ -34,6 +35,7 @@ function teardown() {
   for (const id of [...drawn.keys()]) dropWidget(id);
   drawnDashboardId = null;
   columnNodes = [];
+  columnIds = [];
 }
 
 let renderCount = 0;
@@ -86,7 +88,7 @@ function arrange(parent, sections) {
   }
   const stay = new Set();
   for (let i = best.indexOf(Math.max(...best)); i >= 0 && best[i] >= 0; i = previous[i]) stay.add(sections[i]);
-  let next = null;
+  let next = parent.querySelector('.column-add-widget');
   for (let i = sections.length - 1; i >= 0; i -= 1) {
     if (!stay.has(sections[i])) place(parent, sections[i], next);
     next = sections[i];
@@ -114,7 +116,7 @@ export async function renderDashboard() {
   const dashboard = state.dashboards[state.dashboardId];
   if (dashboard == null) {
     $('dashboard-name').textContent = 'Homey';
-    note(board, 'No dashboards yet. Create one in the Homey mobile app.');
+    note(board, 'No dashboards yet. Choose New dashboard to create your first one.');
     fitBoard();
     return;
   }
@@ -135,7 +137,9 @@ export async function renderDashboard() {
     const columnNode = el('div', 'column');
     board.append(columnNode);
     columnNodes.push(columnNode);
+    columnIds.push(column.id);
     for (const widget of column.widgets) drawWidget(dashboard.id, widget, columnNode, null);
+    addColumnTools(columnNode, dashboard.id, column.id);
   }
   fitBoard();
 }
@@ -148,7 +152,8 @@ export function updateBoard() {
   const widgets = columns.flatMap((column) => column.widgets);
   const unloaded = widgets.flatMap((widget) => WIDGETS[widget.type]?.needs ?? [])
     .some((key) => state.data[key] == null && state.dataErrors[key] == null);
-  if (held || dashboard == null || dashboard.id !== drawnDashboardId || columns.length !== columnNodes.length || unloaded) {
+  if (held || dashboard == null || dashboard.id !== drawnDashboardId || columns.length !== columnNodes.length
+      || columns.some((column, index) => column.id !== columnIds[index]) || unloaded) {
     renderDashboard();
     return;
   }
@@ -164,7 +169,7 @@ export function updateBoard() {
     arrange(columnNodes[index], column.widgets.filter((widget) => drawn.has(widget.id)).map((widget) => drawn.get(widget.id).section));
   }
   for (const [index, column] of columns.entries()) {
-    let next = null;
+    let next = columnNodes[index].querySelector('.column-add-widget');
     for (const widget of [...column.widgets].reverse()) {
       if (!drawn.has(widget.id)) drawWidget(dashboard.id, widget, columnNodes[index], next);
       next = drawn.get(widget.id).section;

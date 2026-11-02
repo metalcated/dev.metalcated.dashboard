@@ -48,6 +48,7 @@ async function harness({ storage = async () => true, script = async () => {} } =
   const imports = {
     './config.js': { APP_ID: 'test.dashboard', servedByHomey: true, loadConfig: () => startup.promise, writeStoredConfig: storage },
     './dashboard-save.js': { isSaving: () => false, loadKeyScopes: async () => {} },
+    './dashboard-editor.js': { initDashboardEditor: noop, syncDashboardEditor: noop },
     './edit-mode.js': { initEditMode: noop, setEditing: noop },
     './embedded.js': { embedded: true, notifyEmbedded: (type) => notifications.push(type) },
     './fit.js': { initFit: noop, isFit: () => false, setFit: noop },

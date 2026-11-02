@@ -40,9 +40,11 @@ const MODES = {
 
 // The collections the pages need that the dashboard may not have loaded.
 async function ensureData(keys) {
+  const client = state.client;
   const missing = keys.filter((key) => state.data[key] == null);
   if (missing.length === 0) return;
   const { data } = await loadData(missing);
+  if (state.client !== client) throw new Error('This connection changed. Reopen the widget settings.');
   Object.assign(state.data, data);
 }
 
@@ -121,6 +123,25 @@ const KINDS = {
     groups: (items) => [{ items: items.sort(byName) }],
     icon: () => svgIcon(DASHBOARD_ICON, 'ws-item-glyph'),
   },
+  zones: {
+    needs: ['zones'],
+    items: () => Object.values(state.data.zones ?? {}),
+    groups: (items) => [{ items: items.sort(byName) }],
+    icon: (zone) => zoneIcon(zone, true),
+  },
+  sensors: {
+    needs: ['devices', 'zones'],
+    items: () => Object.values(state.data.devices ?? {}).flatMap((device) => Object.entries(device.capabilitiesObj ?? {})
+      .filter(([id]) => /^(?:measure_|alarm_)/.test(id) || id === 'level_aqi')
+      .map(([id, capability]) => ({ id: `${device.id}:${id}`, name: `${device.name} — ${capability.title ?? id}`, zone: device.zone }))),
+    groups: (items) => zoneGroups(items, (item) => item.zone),
+  },
+  controls: {
+    needs: ['zones'],
+    items: () => Object.values(state.data.zones ?? {}).flatMap((zone) => ['lights', 'activity', 'speakers', 'energy', 'climate', 'batteries']
+      .map((kind) => ({ id: `${zone.id}:${kind}`, name: `${zone.name} — ${kind[0].toUpperCase()}${kind.slice(1)}` }))),
+    groups: (items) => [{ items: items.sort(byName) }],
+  },
 };
 
 const isLight = (device) => isClass(device, 'light');
@@ -143,6 +164,13 @@ const BUILT_IN = {
   moods_custom: { kind: 'moods', key: 'moodIds', one: 'Mood', many: 'Moods', reorder: true },
   logic_variables: { kind: 'variables', key: 'variableIds', one: 'Variable', many: 'Variables', reorder: true },
   dashboards_shortcuts: { kind: 'dashboards', key: 'dashboardIds', one: 'Dashboard', many: 'Dashboards', reorder: true },
+  devices_zone: { kind: 'zones', key: 'zoneId', scalar: true, one: 'Zone', named: true },
+  moods_zone: { kind: 'zones', key: 'zoneId', scalar: true, one: 'Zone', named: true },
+  light_zones: { kind: 'zones', key: 'zoneId', scalar: true, one: 'Zone', named: true },
+  sensors_selection: { kind: 'sensors', key: 'capabilitiesIds', one: 'Sensor', many: 'Sensors', reorder: true },
+  zone_controls: { kind: 'controls', key: 'controls', one: 'Control', many: 'Controls', reorder: true },
+  device_camera_live: { kind: 'devices', key: 'deviceId', scalar: true, one: 'Camera', filter: (device) => device.videos?.length > 0, named: true },
+  device_camera_snapshot: { kind: 'devices', key: 'cameraId', scalar: true, one: 'Camera', filter: (device) => device.images?.length > 0, named: true },
 };
 
 // The line chart's time spans by tab, as the Homey app offers them; the tab is stored as scale, the span as resolution.
@@ -209,7 +237,9 @@ function appDevicePick(definition) {
 }
 
 // name: what the widget is called on the board.
-export async function openWidgetSettings(dashboardId, widget, name) {
+export async function openWidgetSettings(dashboardId, widget, name, { onSave = null, creating = false, actionLabel = 'Save' } = {}) {
+  const client = state.client;
+  const current = () => client != null && state.client === client;
   const isApp = widget.type === 'app_webview';
   let definition = null;
   if (isApp) {
@@ -224,6 +254,7 @@ export async function openWidgetSettings(dashboardId, widget, name) {
   if (widget.type === 'insights_chart_line') await ensureData(['insightsLogs', 'devices', 'zones']).catch(() => {});
   const isTimeline = widget.type === 'notifications_timeline_large' || widget.type === 'notifications_timeline_small';
   if (isTimeline) await ensureData(['notificationOwners']).catch(() => {});
+  if (!current()) throw new Error('This connection changed. Reopen the widget settings.');
 
   const saved = widget.data?.settings ?? {};
   const savedPicks = toIds(pick ? widget.data?.[pick.key] : null);
@@ -252,7 +283,10 @@ export async function openWidgetSettings(dashboardId, widget, name) {
   action.innerHTML = CHECK_ICON;
   header.append(nav, title, action);
   const content = el('div', 'ws-content');
-  dialog.append(header, content);
+  const saveError = el('p', 'ws-banner ws-save-error');
+  saveError.hidden = true;
+  saveError.setAttribute('role', 'alert');
+  dialog.append(header, saveError, content);
 
   // Pages: { title, action?, actionLabel?, render(root, page) }. The first is the widget's own; the rest open from it.
   const pages = [];
@@ -275,11 +309,12 @@ export async function openWidgetSettings(dashboardId, widget, name) {
     pages.pop();
     show();
   };
-  nav.addEventListener('click', () => (pages.length > 1 ? back() : dialog.close()));
+  nav.addEventListener('click', () => { if (!saving) return pages.length > 1 ? back() : dialog.close(); });
   action.addEventListener('click', () => pages.at(-1).action?.());
   dialog.addEventListener('click', (event) => {
-    if (event.target === dialog) dialog.close();
+    if (event.target === dialog && !saving) dialog.close();
   });
+  dialog.addEventListener('cancel', (event) => { if (saving) event.preventDefault(); });
   dialog.addEventListener('close', () => dialog.remove());
 
   // ----- Building blocks -----
@@ -486,10 +521,15 @@ export async function openWidgetSettings(dashboardId, widget, name) {
       hint(root, 'Its text is written in the Homey app.');
     } else if (widget.type === 'insights_chart_line' || isTimeline) {
       // All its settings are here.
-    } else if (!isApp && (builtIn == null || builtIn.more)) {
+    } else if (!isApp && widget.type !== 'web_frame' && (builtIn == null || builtIn.more)) {
       hint(root, "This widget's other settings can be changed in the Homey app.");
     }
     if (pick) renderPicks(section(root, pick.single ? pick.one : pick.many));
+    if (widget.type === 'device_camera_live' || widget.type === 'device_camera_snapshot') renderCameraSource(root);
+    if (widget.type === 'devices_zone') {
+      switchRow(section(root), 'Include subzones', dataValue('subzones') !== false, (on) => { draft.data.subzones = on; });
+    }
+    if (widget.type === 'web_frame') renderWebFrame(root);
     if (widget.type === 'note') renderNoteColors(section(root, 'Color'));
     if (widget.type === 'insights_chart_line') renderChart(root);
     if (isTimeline) renderTimeline(section(root));
@@ -499,7 +539,7 @@ export async function openWidgetSettings(dashboardId, widget, name) {
         rowButton(group, setting.title, shownValue(setting), () => open(settingPage(setting)));
       }
     }
-    if (definition && canChooseWidgetMode()) {
+    if (definition && !creating && canChooseWidgetMode()) {
       const group = section(root, 'Web dashboard');
       rowButton(group, 'Runs', MODES[draft.mode].title, () => open(modePage()));
     }
@@ -669,6 +709,48 @@ export async function openWidgetSettings(dashboardId, widget, name) {
 
   // A value of the widget's data: as changed here, else as saved.
   const dataValue = (key) => (key in draft.data ? draft.data[key] : widget.data?.[key]);
+
+  const renderCameraSource = (root) => {
+    const live = widget.type === 'device_camera_live';
+    const device = state.data.devices?.[draft.picks[0]];
+    const sources = (live ? device?.videos : device?.images) ?? [];
+    if (!device) return;
+    const key = live ? 'deviceVideoId' : 'displayId';
+    const value = dataValue(key);
+    const selected = sources.find((source) => source.id === value) ?? sources[0];
+    const cameraChanged = draft.picks[0] !== savedPicks[0];
+    if (selected && selected.id !== value && (creating || cameraChanged)) draft.data[key] = selected.id;
+    const group = section(root, live ? 'Video source' : 'Image source');
+    const select = el('select', 'ws-input');
+    select.setAttribute('aria-label', live ? 'Video source' : 'Image source');
+    for (const source of sources) {
+      const option = el('option', null, source.title ?? source.id);
+      option.value = source.id;
+      select.append(option);
+    }
+    if (value && !sources.some((source) => source.id === value) && !cameraChanged && !creating) {
+      const unavailable = el('option', null, 'Previously selected source (unavailable)');
+      unavailable.value = value;
+      select.append(unavailable);
+    }
+    select.value = dataValue(key) ?? selected?.id ?? '';
+    select.addEventListener('change', () => { draft.data[key] = select.value; });
+    group.append(select);
+    if (sources.length === 0) hint(root, 'This camera no longer has a registered source. Select another camera.');
+  };
+
+  const renderWebFrame = (root) => {
+    const group = section(root, 'Web page');
+    const input = el('input', 'ws-input');
+    input.type = 'url';
+    input.value = dataValue('url') ?? '';
+    input.placeholder = 'https://example.com';
+    input.setAttribute('aria-label', 'Web page address');
+    input.addEventListener('input', () => { draft.data.url = input.value.trim(); });
+    group.append(input);
+    switchRow(group, 'Allow scrolling', dataValue('scrollEnabled') === true, (on) => { draft.data.scrollEnabled = on; });
+    hint(root, 'Some websites do not allow their pages to appear inside a dashboard.');
+  };
   // Only numbers make a line, as in the app.
   const logs = () => Object.values(state.data.insightsLogs ?? {}).filter((log) => log.type === 'number');
   const deviceOf = (ownerUri) => (ownerUri.startsWith('homey:device:') ? state.data.devices?.[ownerUri.slice('homey:device:'.length)] : null);
@@ -1001,49 +1083,81 @@ export async function openWidgetSettings(dashboardId, widget, name) {
 
   // ----- Saving -----
 
+  let saving = false;
   const save = async () => {
+    if (saving) return;
     const title = draft.title.trim();
     const titleChanged = draft.titleHidden !== (widget.titleHidden === true) || title !== (widget.title ?? '');
     const changed = Object.keys(draft.settings).filter((id) => !sameValue(draft.settings[id], saved[id]));
     const picksChanged = pick != null && !sameValue(draft.picks, savedPicks);
     const dataChanged = Object.keys(draft.data).filter((key) => !sameValue(draft.data[key], widget.data?.[key]));
-    const modeChanged = draft.mode !== widgetMode(widget.id);
-    action.disabled = true;
-    try {
-      if (titleChanged || changed.length > 0 || picksChanged || dataChanged.length > 0) {
-        await updateDashboard(dashboardId, (columns) => {
-          const target = locateWidget(columns, widget.id).widget;
-          if (draft.titleHidden !== (widget.titleHidden === true)) target.titleHidden = draft.titleHidden;
-          if (title !== (widget.title ?? '')) {
-            // Cleared, it goes back to the name it gets by itself.
-            target.title = title || (definition?.name ?? null);
-            target.titleModified = title !== '';
-          }
-          target.data ??= {};
-          if (changed.length > 0) {
-            target.data.settings = { ...(target.data.settings ?? {}), ...Object.fromEntries(changed.map((id) => [id, draft.settings[id]])) };
-          }
-          for (const key of dataChanged) target.data[key] = draft.data[key];
-          if (picksChanged) {
-            target.data[pick.key] = pick.scalar ? (draft.picks[0] ?? null) : draft.picks;
-            // Named after what it shows, it takes the new pick's name, unless it was renamed.
-            const item = KINDS[pick.kind].items().find((candidate) => candidate.id === draft.picks[0]);
-            if (pick.named && item && !target.titleModified && target.title != null && title === (widget.title ?? '')) {
-              target.title = nameOf(item);
-            }
-          }
-        });
+    const modeChanged = !creating && draft.mode !== widgetMode(widget.id);
+    // Apply only fields edited here, so edits from another client to unrelated settings survive.
+    const apply = (target) => {
+      if (draft.titleHidden !== (widget.titleHidden === true)) target.titleHidden = draft.titleHidden;
+      if (title !== (widget.title ?? '')) {
+        target.title = title || (definition?.name ?? null);
+        target.titleModified = title !== '';
       }
+      target.data ??= {};
+      if (changed.length > 0) {
+        target.data.settings = { ...(target.data.settings ?? {}), ...Object.fromEntries(changed.map((id) => [id, draft.settings[id]])) };
+      }
+      for (const key of dataChanged) target.data[key] = draft.data[key];
+      if (picksChanged) {
+        target.data[pick.key] = pick.scalar ? (draft.picks[0] ?? null) : [...draft.picks];
+        const item = KINDS[pick.kind].items().find((candidate) => candidate.id === draft.picks[0]);
+        if (pick.named && item && !target.titleModified && (creating || target.title != null) && title === (widget.title ?? '')) target.title = nameOf(item);
+      }
+    };
+    saving = true;
+    action.disabled = true;
+    nav.disabled = true;
+    content.inert = true;
+    saveError.hidden = true;
+    try {
+      if (!current()) throw new Error('This connection changed. Reopen the widget settings.');
+      if (!canEditDashboards()) throw new Error(NO_EDIT_PERMISSION);
+      if (widget.type === 'web_frame' && (creating || dataChanged.includes('url'))) {
+        let address;
+        try { address = new URL(dataValue('url')); } catch { /* Show the same validation below. */ }
+        if (!address || !['https:', 'http:'].includes(address.protocol) || address.username || address.password) throw new Error('Enter a valid http or https web page address without a password.');
+      }
+      if (creating) {
+        const created = structuredClone(widget);
+        apply(created);
+        if (pick && draft.picks.length === 0) throw new Error(`Select ${pick.single ? 'a ' + pick.one.toLowerCase() : pick.many.toLowerCase()} before adding this widget.`);
+        if (widget.type === 'device_camera_live' || widget.type === 'device_camera_snapshot') {
+          const live = widget.type === 'device_camera_live';
+          const sources = (live ? state.data.devices?.[draft.picks[0]]?.videos : state.data.devices?.[draft.picks[0]]?.images) ?? [];
+          if (!sources.some((source) => source.id === created.data[live ? 'deviceVideoId' : 'displayId'])) throw new Error('Select an available camera source before adding this widget.');
+        }
+        if (widget.type === 'insights_chart_line' && !created.data.logId) throw new Error('Select an Insight before adding this widget.');
+        if (typeof onSave !== 'function') throw new Error('This widget cannot be added in this view.');
+        await onSave(created);
+      } else if (titleChanged || changed.length > 0 || picksChanged || dataChanged.length > 0) {
+        await updateDashboard(dashboardId, (columns) => apply(locateWidget(columns, widget.id).widget));
+      }
+      if (!current()) return;
       if (modeChanged) await saveWidgetMode(widget.id, draft.mode);
       dialog.close();
     } catch (error) {
+      if (!current()) {
+        dialog.close();
+        return;
+      }
+      saveError.textContent = error.message;
+      saveError.hidden = false;
       toast(error.message);
     } finally {
+      saving = false;
       action.disabled = false;
+      nav.disabled = false;
+      content.inert = false;
     }
   };
 
   document.body.append(dialog);
-  open({ title: draft.title || automaticTitle, action: save, actionLabel: 'Save', render: renderMain });
+  open({ title: draft.title || automaticTitle, action: save, actionLabel, render: renderMain });
   dialog.showModal();
 }

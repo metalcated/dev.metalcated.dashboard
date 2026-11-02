@@ -20,7 +20,10 @@
 </head>
 <body>
 <aside id="dashboard-sidebar" class="dashboard-sidebar" hidden>
-  <h2 class="dashboard-sidebar-title">Dashboards</h2>
+  <div class="dashboard-sidebar-heading">
+    <h2 class="dashboard-sidebar-title">Dashboards</h2>
+    <button id="sidebar-new-dashboard" class="dashboard-new-icon" type="button" aria-label="New dashboard" title="Create a dashboard" hidden>+</button>
+  </div>
   <nav id="dashboard-navigation" aria-label="Dashboards"></nav>
 </aside>
 <header class="bar">
@@ -29,6 +32,8 @@
   <span class="spacer"></span>
   <div class="controls">
     <span id="status" class="status">Connecting</span>
+    <button id="new-dashboard-button" class="round-button dashboard-new-button" type="button" hidden>New dashboard</button>
+    <button id="add-column-button" class="round-button dashboard-add-column" type="button">Add column</button>
     <button id="edit-button" class="round-button" type="button" hidden>Edit</button>
     <button id="settings-button" class="round-button" type="button">Settings</button>
   </div>

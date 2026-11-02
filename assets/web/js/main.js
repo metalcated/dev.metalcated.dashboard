@@ -2,6 +2,7 @@
 
 import { APP_ID, loadConfig, servedByHomey, writeStoredConfig } from './config.js';
 import { isSaving, loadKeyScopes } from './dashboard-save.js';
+import { initDashboardEditor, syncDashboardEditor } from './dashboard-editor.js';
 import { initEditMode, setEditing } from './edit-mode.js';
 import { embedded, notifyEmbedded } from './embedded.js';
 import { initFit, isFit, setFit } from './fit.js';
@@ -39,6 +40,7 @@ function populateDashboardMenu() {
   }));
   $('dashboard-switch').toggleAttribute('data-single', dashboards.length < 2);
   populateDashboardNavigation(dashboards);
+  syncDashboardEditor();
 }
 
 // Desktop navigation shares the same dashboard list and switch path as the title picker. Rebuilding the list after
@@ -505,6 +507,11 @@ async function boot(connection) {
 initKiosk({ onHold: openUnlock, onIdle: kioskIdle });
 initFit();
 initEditMode();
+initDashboardEditor((dashboard) => {
+  state.dashboards[dashboard.id] = dashboard;
+  showDashboard(dashboard.id);
+  setEditing(true);
+});
 // A page restored from the browser's back/forward cache has already closed its
 // event relay on pagehide. Reconnect through normal startup rather than showing
 // a frozen dashboard.

@@ -256,3 +256,38 @@ dialog::backdrop { background: rgb(0 0 0 / 0.5); }
 .widget-menu > button svg { flex: none; width: 22px; height: 22px; }
 .widget-menu .is-danger { color: var(--danger); }
 .widget-menu .is-confirming { font-weight: 600; }
+
+/* Native dashboard authoring uses the same controls and colors as the existing editor. */
+.dashboard-sidebar-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 4px 18px 12px; }
+.dashboard-sidebar-heading .dashboard-sidebar-title { margin: 0; }
+.dashboard-new-icon { display: grid; place-items: center; flex: none; width: 34px; height: 34px; border: 0; border-radius: 50%; background: var(--control); color: var(--text-primary); font-size: 27px; line-height: 1; cursor: pointer; }
+.dashboard-new-icon[hidden], .dashboard-new-button[hidden] { display: none; }
+.dashboard-new-icon:focus-visible, .dashboard-create :is(button, input, select):focus-visible, .column-add-widget:focus-visible { outline: 2px solid var(--shortcut); outline-offset: 3px; }
+.dashboard-add-column, .column-add-widget { display: none; }
+.editing .dashboard-add-column { display: inline-block; }
+.editing .column-add-widget { display: block; }
+.column-add-widget { width: 100%; padding: 20px 14px; border: 1px dashed var(--text-muted); border-radius: 18px; background: transparent; color: var(--shortcut); font-weight: 600; cursor: pointer; }
+.column-add-widget:hover { background: var(--tile); }
+.column:has(> .column-add-widget:only-child) { min-height: 120px; }
+.kiosk :is(.dashboard-new-button, .dashboard-new-icon, .dashboard-add-column, .column-add-widget) { display: none; }
+dialog.dashboard-create { width: min(480px, calc(100vw - 32px)); padding: 26px; border-radius: 24px; }
+.dashboard-create h2 { margin: 0 0 8px; font-size: 26px; letter-spacing: -0.02em; }
+.dashboard-create-intro, .dashboard-create-hint { margin: 0 0 20px; color: var(--text-secondary); font-size: 14px; line-height: 1.5; }
+.dashboard-create label { display: block; margin: 18px 0 7px; font-size: 14px; font-weight: 600; }
+.dashboard-create :is(input, select) { display: block; width: 100%; min-width: 0; border: 1px solid var(--tile-border); border-radius: 12px; background: var(--bg); color: var(--text-primary); padding: 12px; }
+.dashboard-create-hint { margin: 10px 0 0; }
+.dashboard-create-error { color: var(--danger); font-size: 14px; line-height: 1.5; }
+.dashboard-create-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 26px; }
+.dashboard-create-actions .primary { background: var(--shortcut); color: #fff; }
+.dashboard-create :disabled, .dashboard-new-icon:disabled { opacity: 0.5; cursor: default; }
+.widget-picker-item svg { flex: none; }
+.widget-picker-list .ws-section { margin-top: 24px; }
+.ws-save-error { margin: 12px 20px 0; color: var(--danger); }
+@media (min-width: 1040px) {
+  .has-dashboard-navigation .dashboard-new-button { display: none; }
+}
+@media (max-width: 760px) {
+  .bar { flex-wrap: wrap; }
+  .bar .controls { flex-wrap: wrap; }
+  .dashboard-create-actions { flex-wrap: wrap; }
+}

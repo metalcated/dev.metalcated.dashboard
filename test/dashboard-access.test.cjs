@@ -329,6 +329,61 @@ test('admin routes, malformed URLs, traversal, unrelated widgets, deletes and ex
   await assert.rejects(request(f.access, token, 'GET', '/api/manager/devices/device', { value: true }), denied(400));
 });
 
+test('native dashboard creation accepts only the name and valid independent layout identities', async () => {
+  const f = fixture();
+  const { token } = f.access.issue({ screenId: SCREEN });
+  const body = { name: 'New room', columns: [{
+    id: '47ba88a5-458f-4ef5-8b8a-ea987e4c9001', mobileOption: { retain: true }, widgets: [{
+      id: '47ba88a5-458f-4ef5-8b8a-ea987e4c9002', type: 'future-widget', future: { keep: true },
+    }],
+  }] };
+  f.access.inventory = { cached: true };
+  await request(f.access, token, 'POST', '/api/manager/dashboards/dashboard', body);
+  assert.equal(f.calls.length, 1);
+  assert.equal(new URL(f.calls[0].url).pathname, '/api/manager/dashboards/dashboard');
+  assert.equal(f.calls[0].method, 'POST');
+  assert.deepEqual(JSON.parse(f.calls[0].body), body, 'unknown native column/widget fields survive');
+  assert.equal(f.access.inventory, null, 'new app widget instances become discoverable');
+
+  for (const invalid of [
+    undefined, null, [], {}, { name: 'Missing columns' }, { columns: [] },
+    { name: '', columns: [] }, { name: ' ', columns: [] }, { name: 'x'.repeat(201), columns: [] },
+    { ...body, id: 'caller-owned' }, { ...body, permissions: ['homey'] },
+    { ...body, columns: {} }, { ...body, columns: Array(51).fill(body.columns[0]) },
+    { ...body, columns: [null] }, { ...body, columns: [{ id: 'not-a-uuid', widgets: [] }] },
+    { ...body, columns: [{ id: body.columns[0].id }] },
+    { ...body, columns: [{ id: body.columns[0].id, widgets: [null] }] },
+    { ...body, columns: [{ id: body.columns[0].id, widgets: [{}] }] },
+    { ...body, columns: [{ id: body.columns[0].id, widgets: [{ id: body.columns[0].id.toUpperCase() }] }] },
+    { ...body, columns: [body.columns[0], body.columns[0]] },
+  ]) await assert.rejects(request(f.access, token, 'POST', '/api/manager/dashboards/dashboard', invalid), denied(400));
+  assert.equal(f.calls.length, 1, 'invalid creation bodies are rejected before owner requests');
+  for (const [method, path] of [
+    ['POST', '/api/manager/dashboards/dashboard/board'],
+    ['POST', '/api/manager/dashboards/dashboard?admin=true'],
+    ['DELETE', '/api/manager/dashboards/dashboard/board'],
+    ['POST', '/api/manager/dashboards/widgetstore/47ba88a5-458f-4ef5-8b8a-ea987e4c9002/state'],
+  ]) await assert.rejects(request(f.access, token, method, path, body), denied(403));
+  assert.equal(f.calls.length, 1, 'creation does not open deletion, widget-store writes, or unrelated routes');
+});
+
+test('dashboard creation respects the configured key refusal and does not retry ambiguous writes', async () => {
+  for (const status of [403, 500, null]) {
+    const f = fixture();
+    f.homey.settings.set('apiKey', 'configured-dashboard-key');
+    const { token } = f.access.issue({ screenId: SCREEN });
+    f.respond(async () => {
+      if (status === null) throw new Error('Response lost');
+      return { ok: false, status, json: async () => ({ error: 'Refused' }) };
+    });
+    await assert.rejects(request(f.access, token, 'POST', '/api/manager/dashboards/dashboard', {
+      name: 'New room', columns: [{ id: '47ba88a5-458f-4ef5-8b8a-ea987e4c9001', widgets: [] }],
+    }), denied(status ?? 502));
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.ownerCalls(), 0);
+  }
+});
+
 test('401 renews once; ambiguous write failures and other errors are never replayed', async () => {
   const f = fixture();
   const { token } = f.access.issue({ screenId: SCREEN });

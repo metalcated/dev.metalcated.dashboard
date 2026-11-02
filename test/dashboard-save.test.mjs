@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -40,6 +41,7 @@ async function harness(api, dashboard = nativeDashboard()) {
   };
   const context = vm.createContext({
     structuredClone,
+    crypto: webcrypto,
     CustomEvent: class CustomEvent {
       constructor(type, options) {
         this.type = type;
@@ -278,4 +280,203 @@ test('delayed permissions from an older connection cannot enable editing in a re
   finishOldScopes({ scopes: ['homey'] });
   await previous;
   assert.equal(save.canEditDashboards(), false);
+});
+
+const dashboardsPath = '/api/manager/dashboards/dashboard';
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const created = (body) => ({ id: 'new-native-dashboard', ...clone(body) });
+
+test('creates a native blank dashboard with a unique empty column and no browser-owned state', async () => {
+  const save = await harness(async (method, path, body) => {
+    assert.equal(method, 'POST'); assert.equal(path, dashboardsPath);
+    return created(body);
+  });
+  const result = await save.createDashboard({ name: '  New room  ' });
+  assert.equal(result.name, 'New room');
+  assert.deepEqual(Object.keys(save.calls[0].body), ['name', 'columns']);
+  assert.equal(result.columns.length, 1);
+  assert.match(result.columns[0].id, uuid);
+  assert.deepEqual(result.columns[0].widgets, []);
+  assert.deepEqual(save.events, [result]);
+});
+
+test('copy reads the latest source and changes only column/widget identities while preserving native fields', async () => {
+  const source = nativeDashboard();
+  source.columns[0].widgets.push({
+    id: 'shortcut-widget', type: 'dashboards_shortcuts', data: { dashboardIds: [dashboardId, 'another-dashboard'] },
+  }, { id: 'app-instance', type: 'app_webview', data: { appWidgetId: 'catalog-id', deviceIds: ['device-id'], settings: { custom: 42 } } });
+  source.columns.push({ id: 'mobile-column', option: { retain: true }, widgets: [] });
+  const before = clone(source);
+  const save = await harness(async (method, path, body) => {
+    if (method === 'GET') { assert.equal(path, dashboardPath); return source; }
+    assert.equal(method, 'POST'); assert.equal(path, dashboardsPath);
+    return created(body);
+  });
+  const result = await save.createDashboard({ name: 'Copy of Office', sourceId: dashboardId });
+  assert.deepEqual(source, before, 'fresh native source is not mutated');
+  assert.equal(result.mobileMetadata, undefined, 'only the allowed native creation fields are posted');
+  const ids = result.columns.flatMap((column) => [column.id, ...column.widgets.map((widget) => widget.id)]);
+  assert.equal(new Set(ids).size, ids.length);
+  for (const id of ids) assert.match(id, uuid);
+  const stripped = (columns) => columns.map(({ id, widgets, ...rest }) => ({
+    ...rest, widgets: widgets.map(({ id: ignored, ...widget }) => widget),
+  }));
+  assert.deepEqual(stripped(result.columns), stripped(before.columns));
+  assert.deepEqual(result.columns[0].widgets[2].data.dashboardIds, [dashboardId, 'another-dashboard'], 'shortcut targets remain explicit existing dashboards');
+  assert.deepEqual(save.calls.map(({ method }) => method), ['GET', 'POST'], 'copy does not widen widget-store writes');
+  assert.deepEqual(save.events, [result]);
+});
+
+test('known read-only scopes stop creation and additions before any writes', async () => {
+  const save = await harness(async () => ({ scopes: ['homey.dashboard.readonly'] }));
+  await save.loadKeyScopes();
+  assert.throws(() => save.createDashboard({ name: 'Read only' }), { message: save.NO_EDIT_PERMISSION });
+  assert.throws(() => save.addDashboardColumn(dashboardId), { message: save.NO_EDIT_PERMISSION });
+  assert.throws(() => save.addDashboardWidget(dashboardId, 'native-column', { type: 'note' }), { message: save.NO_EDIT_PERMISSION });
+  assert.equal(save.calls.length, 1);
+});
+
+test('definite create refusal allows a later explicit retry but never replays a request automatically', async () => {
+  let allowed = false;
+  const save = await harness(async (method, path, body) => {
+    assert.equal(method, 'POST'); assert.equal(path, dashboardsPath);
+    if (!allowed) throw Object.assign(new Error('Forbidden'), { status: 403 });
+    return created(body);
+  });
+  await assert.rejects(save.createDashboard({ name: 'New room' }), { message: save.NO_EDIT_PERMISSION });
+  assert.equal(save.calls.length, 1);
+  allowed = true;
+  const result = await save.createDashboard({ name: 'New room' });
+  assert.equal(save.calls.length, 2);
+  assert.deepEqual(save.events, [result]);
+});
+
+test('a lost create response reconciles the unique column identity and never posts a duplicate', async () => {
+  let server;
+  const save = await harness(async (method, path, body) => {
+    assert.equal(path, dashboardsPath);
+    if (method === 'POST') {
+      server = created(body);
+      throw new Error('Response lost after creation');
+    }
+    assert.equal(method, 'GET');
+    return { other: { id: 'unrelated', name: 'Same name', columns: [] }, [server.id]: clone(server) };
+  });
+  const result = await save.createDashboard({ name: 'Same name' });
+  assert.deepEqual(result, server);
+  assert.deepEqual(save.calls.map(({ method }) => method), ['POST', 'GET']);
+  assert.deepEqual(save.events, [server]);
+});
+
+test('unconfirmed creation remains blocked on retry and can later reconcile without a second POST', async () => {
+  let server;
+  let visible = false;
+  const save = await harness(async (method, path, body) => {
+    assert.equal(path, dashboardsPath);
+    if (method === 'POST') {
+      server = created(body);
+      throw Object.assign(new Error('Gateway timed out'), { status: 504 });
+    }
+    return visible ? { [server.id]: clone(server) } : {};
+  });
+  await assert.rejects(save.createDashboard({ name: 'Maybe created' }), (error) => error.creationUncertain === true);
+  await assert.rejects(save.createDashboard({ name: 'Maybe created' }), (error) => error.creationUncertain === true);
+  assert.deepEqual(save.calls.map(({ method }) => method), ['POST', 'GET', 'GET']);
+  assert.deepEqual(save.events, []);
+  visible = true;
+  const result = await save.createDashboard({ name: 'Maybe created' });
+  assert.deepEqual(result, server);
+  assert.equal(save.calls.filter(({ method }) => method === 'POST').length, 1);
+  assert.deepEqual(save.events, [server]);
+});
+
+test('concurrent submissions share one creation and late replies cannot affect a replacement connection', async () => {
+  let finishPost;
+  let started;
+  const posting = new Promise((resolve) => { started = resolve; });
+  const save = await harness(async (method, path, body) => {
+    assert.equal(method, 'POST'); assert.equal(path, dashboardsPath);
+    started();
+    return new Promise((resolve) => { finishPost = () => resolve(created(body)); });
+  });
+  const first = save.createDashboard({ name: 'Once' });
+  const second = save.createDashboard({ name: 'Once' });
+  assert.equal(first, second);
+  await posting;
+  save.state.client = { api: () => assert.fail('old creation must not use the new connection') };
+  finishPost();
+  await assert.rejects(first, /connection changed/);
+  assert.equal(save.calls.length, 1);
+  assert.deepEqual(save.events, []);
+});
+
+test('a missing or disconnected copy source cannot create a stale dashboard and a later retry remains usable', async () => {
+  let missing = true;
+  const save = await harness(async (method, path, body) => {
+    if (method === 'GET') {
+      if (missing) throw Object.assign(new Error('Not found'), { status: 404 });
+      return nativeDashboard();
+    }
+    return created(body);
+  });
+  await assert.rejects(save.createDashboard({ name: 'Copy', sourceId: dashboardId }), /deleted meanwhile/);
+  assert.equal(save.calls.filter(({ method }) => method === 'POST').length, 0);
+  missing = false;
+  const result = await save.createDashboard({ name: 'Copy', sourceId: dashboardId });
+  assert.equal(result.name, 'Copy');
+
+  let finishRead;
+  let started;
+  const reading = new Promise((resolve) => { started = resolve; });
+  const other = await harness(async () => { started(); return new Promise((resolve) => { finishRead = resolve; }); });
+  const copying = other.createDashboard({ name: 'Abandoned copy', sourceId: dashboardId });
+  await reading;
+  other.state.client = null;
+  finishRead(nativeDashboard());
+  await assert.rejects(copying, /connection changed/);
+  assert.equal(other.calls.length, 1);
+  assert.deepEqual(other.events, []);
+});
+
+test('column and widget additions serialize latest native layouts and keep caller templates independent', async () => {
+  let server = nativeDashboard();
+  const save = await harness(async (method, path, body) => {
+    assert.equal(path, dashboardPath);
+    if (method === 'GET') return clone(server);
+    server = { ...server, ...clone(body) };
+    server.name = 'Mobile renamed';
+    return clone(server);
+  });
+  const template = { id: 'must-not-share', type: 'note', title: 'New', data: { color: 'blue', future: { keep: true } } };
+  const addingColumn = save.addDashboardColumn(dashboardId);
+  const addingWidget = save.addDashboardWidget(dashboardId, 'native-column', template);
+  template.data.future.keep = false;
+  await Promise.all([addingColumn, addingWidget]);
+  assert.equal(server.name, 'Mobile renamed');
+  assert.equal(server.columns.length, 2);
+  assert.match(server.columns[1].id, uuid);
+  assert.deepEqual(server.columns[1].widgets, []);
+  const widget = server.columns[0].widgets.at(-1);
+  assert.match(widget.id, uuid);
+  assert.deepEqual(widget.data.future, { keep: true });
+  assert.equal(template.id, 'must-not-share');
+  assert.deepEqual(save.calls.map(({ method }) => method), ['GET', 'PUT', 'GET', 'PUT']);
+  assert.deepEqual(save.events, [server]);
+  nativeOnly(save.calls);
+});
+
+test('a removed target column cancels widget addition and leaves the queue ready for a new column', async () => {
+  let server = nativeDashboard();
+  server.columns[0].id = 'changed-on-mobile';
+  const save = await harness(async (method, path, body) => {
+    if (method === 'GET') return clone(server);
+    server = { ...server, ...clone(body) };
+    return clone(server);
+  });
+  await assert.rejects(save.addDashboardWidget(dashboardId, 'native-column', { type: 'note', data: {} }), /column was removed/);
+  assert.equal(save.calls.filter(({ method }) => method === 'PUT').length, 0);
+  await save.addDashboardColumn(dashboardId);
+  assert.equal(server.columns.length, 2);
+  assert.equal(save.isSaving(dashboardId), false);
+  nativeOnly(save.calls);
 });
